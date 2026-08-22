@@ -27,6 +27,7 @@ SERVO_STEP = 18        # Movimiento rápido de la pinza y elevación
 SERVO_UPDATE_INTERVAL = 0.02 # Control de frecuencia BLE (70ms) para evitar delay
 
 # Opciones de Inversión y Puertos
+INVERT_DRIVE = True    # Cambiar a True para invertir avance / retroceso
 INVERT_LIFT = False    # Cambiar a True si la elevación va al revés
 INVERT_PINZA = False   # Cambiar a True si la pinza abre/cierra al revés
 SWAP_SERVO_PORTS = True # Cambiar a True si el Servo 1 es la pinza y el Servo 2 es la elevación
@@ -40,6 +41,9 @@ def normalize_axis(val, deadzone=0.10, max_threshold=0.75):
     return sign * min(1.0, max(0.0, normalized))
 
 def calculate_split_stick_drive(forward_val, turn_val, max_speed=720):
+    if INVERT_DRIVE:
+        forward_val = -forward_val
+
     left_power = forward_val + turn_val
     right_power = forward_val - turn_val
 
@@ -106,7 +110,6 @@ def main():
     joysticks = []
     for i in range(pygame.joystick.get_count()):
         joy = pygame.joystick.Joystick(i)
-        joy.init()
         joysticks.append(joy)
         print(f"🎮 Mando detectado: {joy.get_name()}")
 
@@ -146,7 +149,6 @@ def main():
                 if event.type == pygame.JOYDEVICEADDED:
                     try:
                         joy = pygame.joystick.Joystick(event.device_index)
-                        joy.init()
                         if joy not in joysticks:
                             joysticks.append(joy)
                             print(f"🎮 Mando conectado: {joy.get_name()}")
