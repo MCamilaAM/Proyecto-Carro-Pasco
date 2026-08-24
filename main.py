@@ -3,6 +3,7 @@ import sys
 import time
 import math
 from pasco.pasco_bot import PascoBot
+from gamepad_mapper import GamepadManager, Button, Stick, Trigger, ControllerType
 
 # Ajustar codificación para la consola de Windows
 if sys.platform == "win32":
@@ -24,10 +25,10 @@ PINZA_MIN = -130       # Límite mínimo para CIERRE COMPLETO TOTAL (Servo 2)
 PINZA_MAX = 130        # Límite máximo apertura (Servo 2)
 
 SERVO_STEP = 18        # Movimiento rápido de la pinza y elevación
-SERVO_UPDATE_INTERVAL = 0.02 # Control de frecuencia BLE (70ms) para evitar delay
+SERVO_UPDATE_INTERVAL = 0.02 # Control de frecuencia BLE para evitar delay
 
 # Opciones de Inversión y Puertos
-INVERT_DRIVE = True    # Cambiar a True para invertir avance / retroceso
+INVERT_DRIVE = False   # Cambiar a True para invertir avance / retroceso
 INVERT_LIFT = False    # Cambiar a True si la elevación va al revés
 INVERT_PINZA = False   # Cambiar a True si la pinza abre/cierra al revés
 SWAP_SERVO_PORTS = True # Cambiar a True si el Servo 1 es la pinza y el Servo 2 es la elevación
@@ -44,8 +45,8 @@ def calculate_split_stick_drive(forward_val, turn_val, max_speed=720):
     if INVERT_DRIVE:
         forward_val = -forward_val
 
-    left_power = forward_val + turn_val
-    right_power = forward_val - turn_val
+    left_power = forward_val - turn_val
+    right_power = forward_val + turn_val
 
     max_power = max(abs(left_power), abs(right_power))
     if max_power > 1.0:
@@ -59,7 +60,7 @@ def calculate_split_stick_drive(forward_val, turn_val, max_speed=720):
 
 def main():
     print("=========================================================")
-    print("=== CONTROL AUTOMÁTICO PASCO CON MAPEO NUMÉRICO DIRECTO ===")
+    print("=== CONTROL AUTOMÁTICO PASCO CON GAMEPADMAPPER LIB ===")
     print("=========================================================\n")
 
     # 1. PERMITIR INGRESAR EL ID POR CONSOLA O PRESIONAR ENTER
@@ -101,29 +102,26 @@ def main():
             print(f"❌ Error al conectar por Bluetooth: {e}")
             return
 
-    # 2. INICIALIZAR PYGAME DESPUÉS DE ESTABLECER LA CONEXIÓN BLUETOOTH
-    os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
-    import pygame
-    pygame.init()
-    pygame.joystick.init()
+    # 2. INICIALIZAR GAMEPADMAPPER
+    pad = GamepadManager()
+    if not pad.initialize():
+        print("❌ Error al inicializar GamepadMapperLib.")
+        return
 
-    joysticks = []
-    for i in range(pygame.joystick.get_count()):
-        joy = pygame.joystick.Joystick(i)
-        joysticks.append(joy)
-        print(f"🎮 Mando detectado: {joy.get_name()}")
-
-    if not joysticks:
+    pad.update()
+    if pad.is_connected(0):
+        print("🎮 Mando detectado y conectado correctamente.")
+    else:
         print("ℹ️ Mando físico no detectado en este momento. Conecta tu mando USB/Bluetooth.")
 
     print("\n---------------------------------------------------------")
-    print(" MAPEO NUMÉRICO DIRECTO DE CONTROLES:")
-    print(" 🕹️ Palanca Izquierda (Eje 1):    Avance / Retroceso 100%")
-    print(" 🕹️ Palanca Derecha (Eje 2/3):   Giro 360° Continuo")
-    print(" 🦾 RT / L2 / R2 (Botón 7 / Eje 5): SUBIR Pinza")
-    print(" 🦾 LT / L2 / L2 (Botón 6 / Eje 4): BAJAR Pinza")
-    print(" 🖐️ RB / R1 (Botón 5):            ABRIR Pinza")
-    print(" 🖐️ LB / L1 (Botón 4):            CERRAR Pinza Total")
+    print(" MAPEO UNIVERSAL DE CONTROLES (GAMEPADMAPPER):")
+    print(" 🕹️ Palanca Izquierda (Eje Y):    Avance / Retroceso 100%")
+    print(" 🕹️ Palanca Derecha (Eje X):      Giro 360° Continuo")
+    print(" 🦾 RT / R2 / ZR:                SUBIR Pinza / Elevación")
+    print(" 🦾 LT / L2 / ZL:                BAJAR Pinza / Elevación")
+    print(" 🖐️ RB / R1 / R:                 ABRIR Pinza")
+    print(" 🖐️ LB / L1 / L:                 CERRAR Pinza Total")
     print(" ⏹️ Presiona Ctrl+C para salir.")
     print("---------------------------------------------------------\n")
 
@@ -139,78 +137,40 @@ def main():
 
     try:
         while True:
-            # Procesar eventos de mandos en Pygame de forma aislada
-            try:
-                events = pygame.event.get()
-            except Exception:
-                events = []
-
-            for event in events:
-                if event.type == pygame.JOYDEVICEADDED:
-                    try:
-                        joy = pygame.joystick.Joystick(event.device_index)
-                        if joy not in joysticks:
-                            joysticks.append(joy)
-                            print(f"🎮 Mando conectado: {joy.get_name()}")
-                    except Exception:
-                        pass
-                elif event.type == pygame.JOYDEVICEREMOVED:
-                    joysticks.clear()
-                    print("🎮 Mando desconectado.")
+            # Procesar eventos del GamepadMapper
+            pad.update()
 
             vel_a = 0
             vel_b = 0
 
-            if joysticks:
+            if pad.is_connected(0):
                 try:
-                    joy = joysticks[0]
-                    n_axes = joy.get_numaxes()
-                    n_buttons = joy.get_numbuttons()
-                    joy_name = joy.get_name().lower()
+                    # --- 1. LECTURA DE PALANCAS ANÁLOGAS (NORMALIZADAS -1.0 a 1.0) ---
+                    left_stick = pad.get_stick(0, Stick.LEFT)
+                    right_stick = pad.get_stick(0, Stick.RIGHT)
 
-                    # Bandera para mandos PlayStation / DualSense
-                    is_ps = any(k in joy_name for k in ['dualsense', 'playstation', 'ps5', 'ps4', 'dualshock', 'wireless controller'])
+                    # Avance (Palanca Izquierda Y)
+                    forward = normalize_axis(left_stick.y, DEADZONE, MAX_THRESHOLD)
 
-                    # --- 1. LECTURA POR ÍNDICES NUMÉRICOS DIRECTOS DE PALANCAS ---
-                    raw_forward = joy.get_axis(1) if n_axes > 1 else 0.0
-                    forward = normalize_axis(raw_forward, DEADZONE, MAX_THRESHOLD)
-
-                    # Ejes de Palanca Derecha:
-                    # En DualSense PS5: Eje 2 (X) y Eje 3 (Y)
-                    # En Xbox: Eje 3 (X) y Eje 4 (Y)
-                    axis_rx = 2 if (is_ps and n_axes > 2) else (3 if n_axes > 3 else (2 if n_axes > 2 else 0))
-                    axis_ry = 3 if (is_ps and n_axes > 3) else (4 if n_axes > 4 else (3 if n_axes > 3 else 1))
-
-                    raw_turn_x = joy.get_axis(axis_rx) if n_axes > axis_rx else 0.0
-                    raw_turn_y = -joy.get_axis(axis_ry) if n_axes > axis_ry else 0.0
-
-                    norm_turn_x = -normalize_axis(raw_turn_x, DEADZONE, MAX_THRESHOLD)
-                    norm_turn_y = -normalize_axis(raw_turn_y, DEADZONE, MAX_THRESHOLD)
-
-                    magnitude_right = math.hypot(norm_turn_x, norm_turn_y)
-                    turn = norm_turn_x if magnitude_right > 0 else 0.0
+                    # Giro (Palanca Derecha X)
+                    turn = normalize_axis(right_stick.x, DEADZONE, MAX_THRESHOLD)
 
                     if forward != 0.0 or turn != 0.0:
                         vel_a, vel_b = calculate_split_stick_drive(forward, turn, MAX_SPEED)
 
-                    # --- 2. LECTURA POR ÍNDICES NUMÉRICOS DIRECTOS DE BOTONES Y GATILLOS ---
-                    b4 = joy.get_button(9) if n_buttons > 9 else False
-                    b5 = joy.get_button(10) if n_buttons > 10 else False
-                    b6 = joy.get_button(6) if n_buttons > 6 else False
-                    b7 = joy.get_button(7) if n_buttons > 7 else False
+                    # --- 2. LECTURA DE BOTONES Y GATILLOS ---
+                    lt_state = pad.get_trigger(0, Trigger.LEFT)
+                    rt_state = pad.get_trigger(0, Trigger.RIGHT)
 
-                    ax4 = (joy.get_axis(4) > 0.1) if n_axes > 4 else False
-                    ax5 = (joy.get_axis(5) > 0.1) if n_axes > 5 else False
+                    # SUBIR ELEVACIÓN (RT / R2 / ZR)
+                    rt_pressed = pad.is_button_pressed(0, Button.ZR) or rt_state.pressed or (rt_state.value > 0.2)
+                    # BAJAR ELEVACIÓN (LT / L2 / ZL)
+                    lt_pressed = pad.is_button_pressed(0, Button.ZL) or lt_state.pressed or (lt_state.value > 0.2)
 
-                    # SUBIR ELEVACIÓN (RT / R2): Botón 7 o Eje 5
-                    rt_pressed = b7 or ax5
-                    # BAJAR ELEVACIÓN (LT / L2): Botón 6 o Eje 4
-                    lt_pressed = b6 or ax4
-
-                    # ABRIR PINZA (RB / R1): Botón 5
-                    rb_pressed = b5
-                    # CERRAR PINZA COMPLETA (LB / L1): Botón 4
-                    lb_pressed = b4
+                    # ABRIR PINZA (RB / R1 / R)
+                    rb_pressed = pad.is_button_pressed(0, Button.R)
+                    # CERRAR PINZA (LB / L1 / L)
+                    lb_pressed = pad.is_button_pressed(0, Button.L)
 
                     step_lift = SERVO_STEP if not INVERT_LIFT else -SERVO_STEP
                     if rt_pressed:
@@ -265,6 +225,7 @@ def main():
     except KeyboardInterrupt:
         print("\nDeteniendo robot...")
     finally:
+        pad.shutdown()
         try:
             bot.disconnect()
         except Exception:

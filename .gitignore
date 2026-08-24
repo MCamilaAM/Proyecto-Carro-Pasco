@@ -14,3 +14,12 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Directorios de compilación y temporales
+build/
+*.obj
+*.o
+*.exp
+*.lib
+*.ilk
+*.pdb

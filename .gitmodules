@@ -1,0 +1,3 @@
+[submodule "GamepadMapperLib"]
+	path = GamepadMapperLib
+	url = https://github.com/nosedimetuXD/GamepadMapperLib.git
