@@ -23,3 +23,16 @@ build/
 *.lib
 *.ilk
 *.pdb
+
+# Qt desplegados
+Qt6*.dll
+D3Dcompiler_47.dll
+opengl32sw.dll
+generic/
+iconengines/
+imageformats/
+networkinformation/
+platforms/
+styles/
+tls/
+

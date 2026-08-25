@@ -265,6 +265,9 @@ class GamepadManager:
         self._dll.gamepad_show_config_dialog.argtypes = [ctypes.c_void_p]
         self._dll.gamepad_show_config_dialog.restype = ctypes.c_bool
 
+        self._dll.gamepad_show_single_config_dialog.argtypes = [ctypes.c_void_p]
+        self._dll.gamepad_show_single_config_dialog.restype = ctypes.c_bool
+
     def initialize(self) -> bool:
         """Inicializa los controladores de entrada y hardware (SDL3/Joy-Cons)."""
         return bool(self._dll.gamepad_initialize())
@@ -354,7 +357,41 @@ class GamepadManager:
 
     def show_config_dialog(self, parent=None) -> bool:
         """
-        Abre la ventana modal Qt de configuración y calibración visual de mandos.
+        Abre la ventana modal Qt de configuración y calibración visual de mandos (Multi-jugador).
         Guarda automáticamente los cambios en disco al presionar 'Aceptar' / 'OK'.
         """
         return bool(self._dll.gamepad_show_config_dialog(None))
+
+    def show_single_config_dialog(self, parent=None) -> bool:
+        """
+        Abre la ventana modal Qt moderna de remapeo y calibración para un jugador (Single Player Remapper).
+        """
+        return bool(self._dll.gamepad_show_single_config_dialog(None))
+
+    @staticmethod
+    def launch_single_mapper_app():
+        """
+        Lanza el ejecutable independiente SingleGamepadMapperApp.exe en segundo plano.
+        """
+        import subprocess
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        exe_paths = [
+            os.path.join(current_dir, "SingleGamepadMapperApp.exe"),
+            os.path.join(current_dir, "GamepadMapperLib", "build", "SingleGamepadMapperApp.exe"),
+        ]
+
+        env = os.environ.copy()
+        extra_paths = [
+            r"C:\Qt\6.8.2\msvc2022_64\bin",
+            current_dir,
+            os.path.join(current_dir, "GamepadMapperLib", "build", "_deps", "sdl3-build"),
+            os.path.join(current_dir, "GamepadMapperLib", "build"),
+        ]
+        env["PATH"] = ";".join([p for p in extra_paths if os.path.exists(p)]) + ";" + env.get("PATH", "")
+        if os.path.exists(r"C:\Qt\6.8.2\msvc2022_64\plugins"):
+            env["QT_PLUGIN_PATH"] = r"C:\Qt\6.8.2\msvc2022_64\plugins"
+
+        for exe in exe_paths:
+            if os.path.exists(exe):
+                return subprocess.Popen([exe], cwd=current_dir, env=env)
+        raise FileNotFoundError("No se encontró SingleGamepadMapperApp.exe")
