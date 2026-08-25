@@ -251,6 +251,9 @@ class GamepadManager:
         self._dll.gamepad_update.argtypes = []
         self._dll.gamepad_update.restype = None
 
+        self._dll.gamepad_reload.argtypes = []
+        self._dll.gamepad_reload.restype = None
+
         self._dll.gamepad_is_connected.argtypes = [ctypes.c_int]
         self._dll.gamepad_is_connected.restype = ctypes.c_bool
 
@@ -310,6 +313,10 @@ class GamepadManager:
     def update(self):
         """Procesa eventos de hardware y actualiza el estado de los mandos. Llamar en cada iteración."""
         self._dll.gamepad_update()
+
+    def reload(self):
+        """Recarga todas las configuraciones guardadas en disco y reinicializa los dispositivos mapeados."""
+        self._dll.gamepad_reload()
 
     def is_connected(self, player: int = 0) -> bool:
         """Verifica si el jugador (0..7) tiene un mando conectado."""

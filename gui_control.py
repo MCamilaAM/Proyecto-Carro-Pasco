@@ -260,6 +260,8 @@ class VisualGamepadApp:
         # Gamepad Manager
         self.pad = GamepadManager()
         self.pad_initialized = self.pad.initialize()
+        if self.pad_initialized:
+            self.pad.reload()
 
         # Pasco Robot Worker Thread
         self.bot_connected = False
@@ -469,13 +471,14 @@ class VisualGamepadApp:
                 proc = GamepadManager.launch_single_mapper_app()
                 # Esperar a que el usuario termine el mapeo para recargar automáticamente
                 proc.wait()
-                # Al cerrar el diálogo, recargar configuración en el GamepadManager
-                self.pad.update()
+                # Al cerrar el diálogo, recargar configuración en el GamepadManager desde el disco
+                self.pad.reload()
             except Exception as e:
                 print(f"Error al abrir SingleGamepadMapperApp: {e}")
                 # Fallback al diálogo C-ABI directo
                 try:
-                    self.pad.show_single_config_dialog()
+                    if self.pad.show_single_config_dialog():
+                        self.pad.reload()
                 except Exception as e2:
                     print(f"Fallback C-ABI también falló: {e2}")
 
