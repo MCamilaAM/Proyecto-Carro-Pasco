@@ -294,41 +294,10 @@ class VisualGamepadApp:
         """Abre la interfaz moderna de mapeo (SingleGamepadMapperApp) de forma segura y repetible."""
         def run_task():
             try:
-                # 1. Cerrar cualquier instancia previa huérfana de SingleGamepadMapperApp
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/IM", "SingleGamepadMapperApp.exe"],
-                        capture_output=True,
-                        creationflags=0x08000000
-                    )
-                except Exception:
-                    pass
-
-                # 2. Pausar temporalmente para que libere puertos o archivos
-                time.sleep(0.1)
-
-                # 3. Lanzar SingleGamepadMapperApp.exe con entorno completo
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                exe_path = os.path.join(current_dir, "SingleGamepadMapperApp.exe")
-                if not os.path.exists(exe_path):
-                    exe_path = os.path.join(current_dir, "GamepadMapperLib", "build", "SingleGamepadMapperApp.exe")
-
-                env = os.environ.copy()
-                extra_paths = [
-                    r"C:\Qt\6.8.2\msvc2022_64\bin",
-                    current_dir,
-                    os.path.join(current_dir, "GamepadMapperLib", "build", "_deps", "sdl3-build"),
-                    os.path.join(current_dir, "GamepadMapperLib", "build"),
-                ]
-                env["PATH"] = ";".join([p for p in extra_paths if os.path.exists(p)]) + ";" + env.get("PATH", "")
-                if os.path.exists(r"C:\Qt\6.8.2\msvc2022_64\plugins"):
-                    env["QT_PLUGIN_PATH"] = r"C:\Qt\6.8.2\msvc2022_64\plugins"
-
-                proc = subprocess.Popen([exe_path], cwd=current_dir, env=env)
+                proc = GamepadManager.launch_single_mapper_app()
                 # Esperar a que el usuario termine el mapeo para recargar automáticamente
                 proc.wait()
-
-                # 4. Al cerrar el diálogo, recargar configuración en el GamepadManager
+                # Al cerrar el diálogo, recargar configuración en el GamepadManager
                 self.pad.update()
             except Exception as e:
                 print(f"Error al abrir SingleGamepadMapperApp: {e}")

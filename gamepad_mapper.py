@@ -155,6 +155,42 @@ class GamepadState:
 
 # --- DLL LOADER ---
 
+def _get_dynamic_extra_dirs():
+    dirs = []
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    dirs.append(current_dir)
+    dirs.append(os.path.join(current_dir, "GamepadMapperLib", "build"))
+    dirs.append(os.path.join(current_dir, "GamepadMapperLib", "build", "_deps", "sdl3-build"))
+
+    # 1. Variables de entorno (si están definidas en el sistema)
+    for env_var in ["QTDIR", "QT_PLUGIN_PATH", "CMAKE_PREFIX_PATH"]:
+        val = os.environ.get(env_var)
+        if val and os.path.exists(val):
+            dirs.append(val if "bin" in val else os.path.join(val, "bin"))
+            dirs.append(val if "plugins" in val else os.path.join(val, "plugins"))
+
+    # 2. Búsqueda dinámica automática en rutas comunes de Qt (C:\Qt, D:\Qt, E:\Qt)
+    for drive in ["C:\\Qt", "D:\\Qt", "E:\\Qt"]:
+        if os.path.exists(drive):
+            try:
+                for entry in sorted(os.listdir(drive), reverse=True):
+                    if entry.startswith("6."):
+                        ver_path = os.path.join(drive, entry)
+                        if os.path.isdir(ver_path):
+                            for arch in os.listdir(ver_path):
+                                if "msvc" in arch:
+                                    qt_bin = os.path.join(ver_path, arch, "bin")
+                                    qt_plugins = os.path.join(ver_path, arch, "plugins")
+                                    if os.path.exists(qt_bin):
+                                        dirs.append(qt_bin)
+                                    if os.path.exists(qt_plugins):
+                                        dirs.append(qt_plugins)
+            except Exception:
+                pass
+
+    return [d for d in dict.fromkeys(dirs) if os.path.exists(d)]
+
+
 def _load_gamepad_dll():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     possible_dll_paths = [
@@ -163,12 +199,7 @@ def _load_gamepad_dll():
         os.path.join(current_dir, "GamepadMapperLib", "build", "Release", "GamepadMapper.dll"),
     ]
 
-    # Additional directories for dependencies (Qt6, SDL3)
-    extra_dirs = [
-        r"C:\Qt\6.8.2\msvc2022_64\bin",
-        os.path.join(current_dir, "GamepadMapperLib", "build", "_deps", "sdl3-build"),
-        os.path.join(current_dir, "GamepadMapperLib", "build"),
-    ]
+    extra_dirs = _get_dynamic_extra_dirs()
 
     dll_dirs = []
     if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
@@ -374,22 +405,32 @@ class GamepadManager:
         Lanza el ejecutable independiente SingleGamepadMapperApp.exe en segundo plano.
         """
         import subprocess
+        # 1. Matar cualquier proceso huérfano anterior
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "SingleGamepadMapperApp.exe"],
+                capture_output=True,
+                creationflags=0x08000000
+            )
+        except Exception:
+            pass
+
         current_dir = os.path.dirname(os.path.abspath(__file__))
         exe_paths = [
             os.path.join(current_dir, "SingleGamepadMapperApp.exe"),
             os.path.join(current_dir, "GamepadMapperLib", "build", "SingleGamepadMapperApp.exe"),
+            os.path.join(current_dir, "GamepadMapperLib", "build", "Release", "SingleGamepadMapperApp.exe"),
         ]
 
         env = os.environ.copy()
-        extra_paths = [
-            r"C:\Qt\6.8.2\msvc2022_64\bin",
-            current_dir,
-            os.path.join(current_dir, "GamepadMapperLib", "build", "_deps", "sdl3-build"),
-            os.path.join(current_dir, "GamepadMapperLib", "build"),
-        ]
-        env["PATH"] = ";".join([p for p in extra_paths if os.path.exists(p)]) + ";" + env.get("PATH", "")
-        if os.path.exists(r"C:\Qt\6.8.2\msvc2022_64\plugins"):
-            env["QT_PLUGIN_PATH"] = r"C:\Qt\6.8.2\msvc2022_64\plugins"
+        extra_paths = _get_dynamic_extra_dirs()
+        env["PATH"] = ";".join(extra_paths) + ";" + env.get("PATH", "")
+
+        # Buscar plugins de Qt dinámicamente
+        for p in extra_paths:
+            if "plugins" in p and os.path.exists(p):
+                env["QT_PLUGIN_PATH"] = p
+                break
 
         for exe in exe_paths:
             if os.path.exists(exe):
