@@ -15,6 +15,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+import queue
+
 from gamepad_mapper import GamepadManager, Button, Stick, Trigger, ControllerType
 
 # Importar PascoBot si está disponible
@@ -72,6 +74,181 @@ def calculate_split_stick_drive(forward_val, turn_val, max_speed=720):
     return vel_a, vel_b
 
 
+class PascoRobotWorker:
+    """
+    Controlador en hilo secundario independiente para el robot PASCO //control.Node.
+    Mantiene su propio event loop de asyncio para BLE, evitando bloqueos de la interfaz gráfica (Tkinter)
+    y sincronizando de forma segura los comandos continuos de motores paso a paso y servomotores.
+    """
+    def __init__(self, on_status_callback=None):
+        self.on_status = on_status_callback
+        self.bot = None
+        self.connected = False
+        self.running = True
+
+        self.lock = threading.Lock()
+        self.target_vel_a = 0
+        self.target_vel_b = 0
+        self.target_lift = 0
+        self.target_pinza = 0
+        self.emergency = False
+        self.output_enabled = True
+
+        self.current_vel_a = 0
+        self.current_vel_b = 0
+        self.current_lift = None
+        self.current_pinza = None
+        self.is_moving = False
+        self.last_servo_send = 0
+
+        self.cmd_queue = queue.Queue()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def connect(self, target_id):
+        self.cmd_queue.put(("connect", target_id))
+
+    def disconnect(self):
+        self.cmd_queue.put(("disconnect", None))
+
+    def stop_worker(self):
+        self.running = False
+        self.cmd_queue.put(("stop", None))
+
+    def update_targets(self, vel_a, vel_b, lift, pinza, emergency=False, output_enabled=True):
+        with self.lock:
+            self.target_vel_a = 0 if emergency else vel_a
+            self.target_vel_b = 0 if emergency else vel_b
+            self.target_lift = lift
+            self.target_pinza = pinza
+            self.emergency = emergency
+            self.output_enabled = output_enabled
+
+    def _notify(self, status, message):
+        if self.on_status:
+            self.on_status(status, message)
+
+    def _run(self):
+        while self.running:
+            # Procesar comandos de conexión / desconexión
+            try:
+                while not self.cmd_queue.empty():
+                    action, arg = self.cmd_queue.get_nowait()
+                    if action == "stop":
+                        if self.bot and self.connected:
+                            try:
+                                self.bot.stop_steppers(9999, 9999)
+                                self.bot.disconnect()
+                            except Exception:
+                                pass
+                        return
+                    elif action == "disconnect":
+                        if self.bot and self.connected:
+                            try:
+                                self.bot.stop_steppers(9999, 9999)
+                                self.bot.disconnect()
+                            except Exception:
+                                pass
+                        self.connected = False
+                        self.is_moving = False
+                        self._notify("disconnected", "Desconectado")
+                    elif action == "connect":
+                        target_id = arg
+                        self._notify("connecting", f"Conectando a {target_id}...")
+                        try:
+                            if not self.bot:
+                                self.bot = PascoBot()
+
+                            self.bot.connect_by_id(target_id)
+                            self.connected = True
+                            self.current_vel_a = 0
+                            self.current_vel_b = 0
+                            self.current_lift = None
+                            self.current_pinza = None
+                            self.is_moving = False
+                            print(f"[PASCO BLE] Conexión establecida con éxito con ID '{target_id}'")
+                            self._notify("connected", target_id)
+                        except Exception as e1:
+                            print(f"[PASCO BLE] connect_by_id fallo ({e1}). Intentando escanear...")
+                            try:
+                                devs = self.bot.scan()
+                                if devs:
+                                    self.bot.connect(devs[0])
+                                    self.connected = True
+                                    self.current_vel_a = 0
+                                    self.current_vel_b = 0
+                                    self.current_lift = None
+                                    self.current_pinza = None
+                                    self.is_moving = False
+                                    print(f"[PASCO BLE] Conexión establecida con {devs[0].name}")
+                                    self._notify("connected", devs[0].name)
+                                else:
+                                    self.connected = False
+                                    print(f"[PASCO BLE] No se encontraron dispositivos.")
+                                    self._notify("error", f"No se encontró el robot: {e1}")
+                            except Exception as e2:
+                                self.connected = False
+                                print(f"[PASCO BLE ERROR]: {e2}")
+                                self._notify("error", f"Error de conexión: {e2}")
+            except Exception as e:
+                print(f"[PASCO WORKER QUEUE ERROR]: {e}")
+
+            # Transmisión continua de comandos al //control.Node
+            if self.connected and self.bot:
+                with self.lock:
+                    t_vel_a = self.target_vel_a
+                    t_vel_b = self.target_vel_b
+                    t_lift = self.target_lift
+                    t_pinza = self.target_pinza
+                    emerg = self.emergency
+                    enabled = self.output_enabled
+
+                if emerg or not enabled:
+                    if self.is_moving:
+                        try:
+                            self.bot.stop_steppers(9999, 9999)
+                        except Exception as e:
+                            print(f"[PASCO STOP ERROR]: {e}")
+                        self.is_moving = False
+                        self.current_vel_a = 0
+                        self.current_vel_b = 0
+                else:
+                    # 1. Enviar Servomotores (Pinza y Elevación)
+                    now = time.time()
+                    if (t_lift != self.current_lift or t_pinza != self.current_pinza) and (now - self.last_servo_send >= SERVO_UPDATE_INTERVAL):
+                        try:
+                            s1 = t_lift if not SWAP_SERVO_PORTS else t_pinza
+                            s2 = t_pinza if not SWAP_SERVO_PORTS else t_lift
+                            self.bot.set_servos("standard", s1, "standard", s2)
+                            self.current_lift = t_lift
+                            self.current_pinza = t_pinza
+                            self.last_servo_send = now
+                        except Exception as e:
+                            print(f"[PASCO SERVO ERROR]: {e}")
+
+                    # 2. Enviar Motores Paso a Paso (Steppers)
+                    if t_vel_a != self.current_vel_a or t_vel_b != self.current_vel_b or (not self.is_moving and (t_vel_a != 0 or t_vel_b != 0)):
+                        if t_vel_a != 0 or t_vel_b != 0:
+                            try:
+                                self.bot.rotate_steppers_continuously(t_vel_a, ACCEL, t_vel_b, ACCEL)
+                                self.current_vel_a = t_vel_a
+                                self.current_vel_b = t_vel_b
+                                self.is_moving = True
+                            except Exception as e:
+                                print(f"[PASCO STEPPER ERROR]: {e}")
+                        else:
+                            if self.is_moving:
+                                try:
+                                    self.bot.stop_steppers(ACCEL, ACCEL)
+                                except Exception as e:
+                                    print(f"[PASCO STOP STEPPER ERROR]: {e}")
+                                self.is_moving = False
+                                self.current_vel_a = 0
+                                self.current_vel_b = 0
+
+            time.sleep(0.015)  # Frecuencia de actualización ~60Hz
+
+
 class VisualGamepadApp:
     def __init__(self, root):
         self.root = root
@@ -84,24 +261,19 @@ class VisualGamepadApp:
         self.pad = GamepadManager()
         self.pad_initialized = self.pad.initialize()
 
-        # Pasco Robot
-        self.bot = PascoBot() if PASCO_AVAILABLE else None
+        # Pasco Robot Worker Thread
         self.bot_connected = False
         self.is_connecting = False
+        self.robot_worker = PascoRobotWorker(on_status_callback=self._handle_robot_status) if PASCO_AVAILABLE else None
 
         # Estados de control y parada de emergencia
         self.vel_a = 0
         self.vel_b = 0
-        self.last_vel_a = 0
-        self.last_vel_b = 0
         self.is_moving = False
         self.emergency_latched = False
 
         self.lift_angle = 0
         self.pinza_angle = 0
-        self.last_lift = None
-        self.last_pinza = None
-        self.last_servo_send = 0
 
         self.enable_robot_output = tk.BooleanVar(value=True)
 
@@ -309,6 +481,40 @@ class VisualGamepadApp:
 
         threading.Thread(target=run_task, daemon=True).start()
 
+    def _handle_robot_status(self, status, msg):
+        if status == "connected":
+            self.root.after(0, self._on_connect_success, msg)
+        elif status == "disconnected":
+            self.root.after(0, self._on_disconnect_success)
+        elif status == "connecting":
+            self.root.after(0, self._on_connecting, msg)
+        elif status == "error":
+            self.root.after(0, self._on_connect_fail, msg)
+
+    def _on_connecting(self, msg):
+        self.is_connecting = True
+        self.connect_btn.config(text="Conectando...", state=tk.DISABLED, bg="#ffb86c", fg="#14151a")
+        self.robot_status_lbl.config(text=f"● {msg}", fg="#ffb86c")
+
+    def _on_connect_success(self, dev_name):
+        self.is_connecting = False
+        self.bot_connected = True
+        self.connect_btn.config(text="Desconectar", state=tk.NORMAL, bg="#ff5555", fg="#ffffff")
+        self.robot_status_lbl.config(text=f"● Conectado a {dev_name}", fg="#50fa7b")
+
+    def _on_disconnect_success(self):
+        self.bot_connected = False
+        self.is_connecting = False
+        self.connect_btn.config(text="Conectar", state=tk.NORMAL, bg="#50fa7b", fg="#14151a")
+        self.robot_status_lbl.config(text="● Robot Desconectado", fg="#ff5555")
+
+    def _on_connect_fail(self, err):
+        self.is_connecting = False
+        self.bot_connected = False
+        self.connect_btn.config(text="Conectar", state=tk.NORMAL, bg="#50fa7b", fg="#14151a")
+        self.robot_status_lbl.config(text="❌ Error de conexión", fg="#ff5555")
+        messagebox.showerror("Error Bluetooth", f"No se pudo conectar al robot PASCO //control.Node:\n{err}")
+
     def _toggle_emergency_stop(self):
         """Activa o desactiva la parada de emergencia y detiene los motores de inmediato."""
         if not self.emergency_latched:
@@ -316,12 +522,8 @@ class VisualGamepadApp:
             self.emergency_latched = True
             self.vel_a = 0
             self.vel_b = 0
-            if self.bot and self.bot_connected:
-                try:
-                    self.bot.stop_steppers(9999, 9999)
-                except Exception:
-                    pass
-                self.is_moving = False
+            if self.robot_worker:
+                self.robot_worker.update_targets(0, 0, self.lift_angle, self.pinza_angle, emergency=True, output_enabled=self.enable_robot_output.get())
 
             self.stop_btn.config(
                 text="⚠️ MOTORES BLOQUEADOS\n(Click para Reanudar Control)",
@@ -331,6 +533,9 @@ class VisualGamepadApp:
         else:
             # DESACTIVAR PARADA Y REANUDAR
             self.emergency_latched = False
+            if self.robot_worker:
+                self.robot_worker.update_targets(self.vel_a, self.vel_b, self.lift_angle, self.pinza_angle, emergency=False, output_enabled=self.enable_robot_output.get())
+
             self.stop_btn.config(
                 text="🛑 PARADA DE EMERGENCIA",
                 bg="#ff5555",
@@ -344,8 +549,8 @@ class VisualGamepadApp:
             self._connect_robot()
 
     def _connect_robot(self):
-        if not PASCO_AVAILABLE:
-            messagebox.showerror("Error", "El paquete pasco no está instalado.")
+        if not PASCO_AVAILABLE or not self.robot_worker:
+            messagebox.showerror("Error", "El paquete pasco no está disponible.")
             return
 
         target_id = self.id_entry.get().strip()
@@ -355,52 +560,12 @@ class VisualGamepadApp:
         if len(target_id) == 6 and '-' not in target_id:
             target_id = f"{target_id[:3]}-{target_id[3:]}"
 
-        self.is_connecting = True
-        self.connect_btn.config(text="Conectando...", state=tk.DISABLED, bg="#ffb86c", fg="#14151a")
-        self.robot_status_lbl.config(text="● Conectando por Bluetooth...", fg="#ffb86c")
-
-        def task():
-            try:
-                self.bot.connect_by_id(target_id)
-                self.bot_connected = True
-                self.root.after(0, self._on_connect_success, target_id)
-            except Exception as e:
-                # Intentar escanear
-                try:
-                    devs = self.bot.scan()
-                    if devs:
-                        self.bot.connect(devs[0])
-                        self.bot_connected = True
-                        self.root.after(0, self._on_connect_success, devs[0].name)
-                        return
-                except Exception:
-                    pass
-                self.root.after(0, self._on_connect_fail, str(e))
-
-        threading.Thread(target=task, daemon=True).start()
-
-    def _on_connect_success(self, dev_name):
-        self.is_connecting = False
-        self.connect_btn.config(text="Desconectar", state=tk.NORMAL, bg="#ff5555", fg="#ffffff")
-        self.robot_status_lbl.config(text=f"● Conectado a {dev_name}", fg="#50fa7b")
-
-    def _on_connect_fail(self, err):
-        self.is_connecting = False
-        self.bot_connected = False
-        self.connect_btn.config(text="Conectar", state=tk.NORMAL, bg="#50fa7b", fg="#14151a")
-        self.robot_status_lbl.config(text="❌ Error de conexión", fg="#ff5555")
-        messagebox.showerror("Error Bluetooth", f"No se pudo conectar al robot PASCO:\n{err}")
+        self.robot_worker.connect(target_id)
 
     def _disconnect_robot(self):
-        if self.bot and self.bot_connected:
-            try:
-                self.bot.stop_steppers(9999, 9999)
-                self.bot.disconnect()
-            except Exception:
-                pass
-        self.bot_connected = False
-        self.connect_btn.config(text="Conectar", state=tk.NORMAL, bg="#50fa7b", fg="#14151a")
-        self.robot_status_lbl.config(text="● Robot Desconectado", fg="#ff5555")
+        if self.robot_worker:
+            self.robot_worker.disconnect()
+        self._on_disconnect_success()
 
     def _start_poll_loop(self):
         self._poll_step()
@@ -449,44 +614,20 @@ class VisualGamepadApp:
                 self.pinza_angle = min(PINZA_MAX, max(PINZA_MIN, self.pinza_angle + step_pinza))
             elif lb_pressed:
                 self.pinza_angle = min(PINZA_MAX, max(PINZA_MIN, self.pinza_angle - step_pinza))
-
-            # Enviar a Robot PASCO si está conectado y habilitado
-            if self.bot_connected and self.enable_robot_output.get() and self.bot:
-                # Servos
-                now = time.time()
-                if (self.lift_angle != self.last_lift or self.pinza_angle != self.last_pinza) and (now - self.last_servo_send >= SERVO_UPDATE_INTERVAL):
-                    try:
-                        s1 = self.lift_angle if not SWAP_SERVO_PORTS else self.pinza_angle
-                        s2 = self.pinza_angle if not SWAP_SERVO_PORTS else self.lift_angle
-                        self.bot.set_servos("standard", s1, "standard", s2)
-                        self.last_lift = self.lift_angle
-                        self.last_pinza = self.pinza_angle
-                        self.last_servo_send = now
-                    except Exception:
-                        pass
-
-                # Motores paso a paso
-                if self.vel_a != 0 or self.vel_b != 0:
-                    if self.vel_a != self.last_vel_a or self.vel_b != self.last_vel_b or not self.is_moving:
-                        try:
-                            self.bot.rotate_steppers_continuously(self.vel_a, ACCEL, self.vel_b, ACCEL)
-                            self.last_vel_a = self.vel_a
-                            self.last_vel_b = self.vel_b
-                            self.is_moving = True
-                        except Exception:
-                            pass
-                else:
-                    if self.is_moving:
-                        try:
-                            self.bot.stop_steppers(ACCEL, ACCEL)
-                            self.last_vel_a = 0
-                            self.last_vel_b = 0
-                            self.is_moving = False
-                        except Exception:
-                            pass
         elif self.emergency_latched:
             self.vel_a = 0
             self.vel_b = 0
+
+        # Transmitir al controlador BLE del robot en segundo plano
+        if self.robot_worker:
+            self.robot_worker.update_targets(
+                vel_a=self.vel_a,
+                vel_b=self.vel_b,
+                lift=self.lift_angle,
+                pinza=self.pinza_angle,
+                emergency=self.emergency_latched,
+                output_enabled=self.enable_robot_output.get()
+            )
 
         # 4. Actualizar UI y Dibujar Canvas Realista del Mando
         self._update_telemetry_ui(is_pad_connected)
@@ -720,7 +861,8 @@ class VisualGamepadApp:
         self.canvas.create_text(x, y, text=label, fill=fg, font=("Segoe UI", 8, "bold"))
 
     def on_close(self):
-        self._disconnect_robot()
+        if self.robot_worker:
+            self.robot_worker.stop_worker()
         self.pad.shutdown()
         self.root.destroy()
 
