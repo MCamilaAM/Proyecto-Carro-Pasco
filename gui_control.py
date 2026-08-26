@@ -733,14 +733,14 @@ class VisualGamepadApp:
         dpad_cy = cy + 45
         self._draw_realistic_dpad(dpad_cx, dpad_cy, 22, btns)
 
-        # 5. Botones de Acción (A, B, X, Y) (Arriba a la Derecha - Formación Diamante)
+        # 5. Botones de Acción (A, B, X, Y) (Arriba a la Derecha - Formación Diamante Nintendo)
         abxy_cx = cx + 95
         abxy_cy = cy - 40
         b_rad = 14
-        self._draw_action_button(abxy_cx, abxy_cy + 24, b_rad, "A", btns[Button.A], "#50fa7b")   # Verde
-        self._draw_action_button(abxy_cx + 24, abxy_cy, b_rad, "B", btns[Button.B], "#ff5555")   # Rojo
-        self._draw_action_button(abxy_cx - 24, abxy_cy, b_rad, "X", btns[Button.X], "#8be9fd")   # Azul/Cyan
-        self._draw_action_button(abxy_cx, abxy_cy - 24, b_rad, "Y", btns[Button.Y], "#ffb86c")   # Amarillo/Naranja
+        self._draw_action_button(abxy_cx + 24, abxy_cy, b_rad, "A", btns[Button.A], "#ff5555")   # A: Derecha
+        self._draw_action_button(abxy_cx, abxy_cy + 24, b_rad, "B", btns[Button.B], "#ffb86c")   # B: Abajo
+        self._draw_action_button(abxy_cx, abxy_cy - 24, b_rad, "X", btns[Button.X], "#8be9fd")   # X: Arriba
+        self._draw_action_button(abxy_cx - 24, abxy_cy, b_rad, "Y", btns[Button.Y], "#50fa7b")   # Y: Izquierda
 
         # 6. Stick Derecho (Abajo a la Derecha)
         sr_cx = cx + 60
