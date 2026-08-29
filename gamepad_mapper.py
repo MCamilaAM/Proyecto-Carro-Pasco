@@ -7,9 +7,25 @@ Provides clean Pythonic access to GamepadMapperLib (C++20 Gamepad Subsystem).
 import os
 import sys
 import ctypes
+import subprocess
 from enum import IntEnum
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
+
+
+# --- CONFIGURAR RUTAS DE PLUGINS QT ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+qt_plugin_dirs = [
+    os.path.join(current_dir, "platforms"),
+    r"C:\Qt\6.8.2\msvc2022_64\plugins\platforms",
+]
+for p in qt_plugin_dirs:
+    if os.path.exists(p):
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = p
+        break
+
+if os.path.exists(r"C:\Qt\6.8.2\msvc2022_64\plugins"):
+    os.environ["QT_PLUGIN_PATH"] = r"C:\Qt\6.8.2\msvc2022_64\plugins"
 
 
 # --- ENUMS ---
@@ -155,51 +171,21 @@ class GamepadState:
 
 # --- DLL LOADER ---
 
-def _get_dynamic_extra_dirs():
-    dirs = []
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    dirs.append(current_dir)
-    dirs.append(os.path.join(current_dir, "GamepadMapperLib", "build"))
-    dirs.append(os.path.join(current_dir, "GamepadMapperLib", "build", "_deps", "sdl3-build"))
-
-    # 1. Variables de entorno (si están definidas en el sistema)
-    for env_var in ["QTDIR", "QT_PLUGIN_PATH", "CMAKE_PREFIX_PATH"]:
-        val = os.environ.get(env_var)
-        if val and os.path.exists(val):
-            dirs.append(val if "bin" in val else os.path.join(val, "bin"))
-            dirs.append(val if "plugins" in val else os.path.join(val, "plugins"))
-
-    # 2. Búsqueda dinámica automática en rutas comunes de Qt (C:\Qt, D:\Qt, E:\Qt)
-    for drive in ["C:\\Qt", "D:\\Qt", "E:\\Qt"]:
-        if os.path.exists(drive):
-            try:
-                for entry in sorted(os.listdir(drive), reverse=True):
-                    if entry.startswith("6."):
-                        ver_path = os.path.join(drive, entry)
-                        if os.path.isdir(ver_path):
-                            for arch in os.listdir(ver_path):
-                                if "msvc" in arch:
-                                    qt_bin = os.path.join(ver_path, arch, "bin")
-                                    qt_plugins = os.path.join(ver_path, arch, "plugins")
-                                    if os.path.exists(qt_bin):
-                                        dirs.append(qt_bin)
-                                    if os.path.exists(qt_plugins):
-                                        dirs.append(qt_plugins)
-            except Exception:
-                pass
-
-    return [d for d in dict.fromkeys(dirs) if os.path.exists(d)]
-
-
 def _load_gamepad_dll():
-    current_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(os.path.abspath(__file__))
     possible_dll_paths = [
-        os.path.join(current_dir, "GamepadMapper.dll"),
-        os.path.join(current_dir, "GamepadMapperLib", "build", "GamepadMapper.dll"),
-        os.path.join(current_dir, "GamepadMapperLib", "build", "Release", "GamepadMapper.dll"),
+        os.path.join(root_dir, "GamepadMapper.dll"),
+        os.path.join(root_dir, "GamepadMapperLib", "build", "GamepadMapper.dll"),
+        os.path.join(root_dir, "GamepadMapperLib", "build", "Release", "GamepadMapper.dll"),
     ]
 
-    extra_dirs = _get_dynamic_extra_dirs()
+    # Additional directories for dependencies (Qt6, SDL3)
+    extra_dirs = [
+        r"C:\Qt\6.8.2\msvc2022_64\bin",
+        os.path.join(root_dir, "GamepadMapperLib", "build", "_deps", "sdl3-build"),
+        os.path.join(root_dir, "GamepadMapperLib", "build"),
+        root_dir,
+    ]
 
     dll_dirs = []
     if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
@@ -318,7 +304,7 @@ class GamepadManager:
         self._dll.gamepad_update()
 
     def reload(self):
-        """Recarga todas las configuraciones guardadas en disco y reinicializa los dispositivos mapeados."""
+        """Recarga todas las configuraciones guardadas en disco y actualiza los dispositivos inmediatamente."""
         self._dll.gamepad_reload()
 
     def is_connected(self, player: int = 0) -> bool:
@@ -377,7 +363,8 @@ class GamepadManager:
                 motion=MotionState(
                     accel_x=s.motion.accel_x, accel_y=s.motion.accel_y, accel_z=s.motion.accel_z,
                     gyro_x=s.motion.gyro_x, gyro_y=s.motion.gyro_y, gyro_z=s.motion.gyro_z,
-                    quat_w=s.motion.quat_w, quat_x=s.motion.quat_x, quat_y=s.motion.quat_y, quat_z=s.motion.quat_z
+                    quat_w=s.motion.quat_w, quat_x=s.motion.quat_x, quat_y=s.motion.quat_y,
+                    quat_z=s.motion.quat_z
                 ),
                 battery_percentage=s.battery_percentage,
                 is_charging=s.is_charging
@@ -397,66 +384,56 @@ class GamepadManager:
         return bool(self._dll.gamepad_load_profile(player, profile_name.encode('utf-8')))
 
     def show_config_dialog(self, parent=None) -> bool:
-        """
-        Abre la ventana modal Qt de configuración y calibración visual de mandos (Multi-jugador).
-        Guarda automáticamente los cambios en disco al presionar 'Aceptar' / 'OK'.
-        """
+        """Abre la ventana modal Qt completa de configuración y calibración."""
         return bool(self._dll.gamepad_show_config_dialog(None))
 
     def show_single_config_dialog(self, parent=None) -> bool:
-        """
-        Abre la ventana modal Qt moderna de remapeo y calibración para un jugador (Single Player Remapper).
-        """
+        """Abre la ventana modal Qt de mapeo para 1 solo jugador."""
         return bool(self._dll.gamepad_show_single_config_dialog(None))
 
     def show_single_switch_config_dialog(self, parent=None) -> bool:
-        """
-        Abre la ventana modal Qt dedicada al remapeo de mandos a Nintendo Switch con selector de tipo de mando.
-        """
+        """Abre la ventana modal Qt de mapeo de Nintendo Switch / Pro Controller."""
         return bool(self._dll.gamepad_show_single_switch_config_dialog(None))
 
     @staticmethod
-    def launch_single_mapper_app():
+    def launch_config_process(mode: str = "switch"):
         """
-        Lanza el ejecutable independiente SingleGamepadMapperApp.exe o SingleSwitchMapperApp.exe en segundo plano.
+        Lanza la interfaz de configuración en un proceso independiente de Windows.
+        Esto previene cualquier conflicto de hilos con Tkinter.
         """
-        import subprocess
-        # 1. Matar cualquier proceso huérfano anterior
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "SingleSwitchMapperApp.exe"],
-                capture_output=True,
-                creationflags=0x08000000
-            )
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "SingleGamepadMapperApp.exe"],
-                capture_output=True,
-                creationflags=0x08000000
-            )
-        except Exception:
-            pass
+        root_dir = os.path.dirname(os.path.abspath(__file__))
+        app_candidates = {
+            "switch": [
+                os.path.join(root_dir, "SingleSwitchMapperApp.exe"),
+                os.path.join(root_dir, "GamepadMapperLib", "build", "SingleSwitchMapperApp.exe"),
+            ],
+            "single": [
+                os.path.join(root_dir, "SingleGamepadMapperApp.exe"),
+                os.path.join(root_dir, "GamepadMapperLib", "build", "SingleGamepadMapperApp.exe"),
+            ],
+            "multi": [
+                os.path.join(root_dir, "GamepadMapperApp.exe"),
+                os.path.join(root_dir, "GamepadMapperLib", "build", "GamepadMapperApp.exe"),
+            ]
+        }
 
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        exe_paths = [
-            os.path.join(current_dir, "SingleSwitchMapperApp.exe"),
-            os.path.join(current_dir, "SingleGamepadMapperApp.exe"),
-            os.path.join(current_dir, "GamepadMapperLib", "build", "SingleSwitchMapperApp.exe"),
-            os.path.join(current_dir, "GamepadMapperLib", "build", "SingleGamepadMapperApp.exe"),
-            os.path.join(current_dir, "GamepadMapperLib", "build", "Release", "SingleSwitchMapperApp.exe"),
-            os.path.join(current_dir, "GamepadMapperLib", "build", "Release", "SingleGamepadMapperApp.exe"),
-        ]
+        for path in app_candidates.get(mode, app_candidates["switch"]):
+            if os.path.exists(path):
+                return subprocess.Popen([path], cwd=root_dir)
 
-        env = os.environ.copy()
-        extra_paths = _get_dynamic_extra_dirs()
-        env["PATH"] = ";".join(extra_paths) + ";" + env.get("PATH", "")
+        # Fallback a script python
+        return subprocess.Popen([sys.executable, __file__, f"--{mode}"], cwd=root_dir)
 
-        # Buscar plugins de Qt dinámicamente
-        for p in extra_paths:
-            if "plugins" in p and os.path.exists(p):
-                env["QT_PLUGIN_PATH"] = p
-                break
 
-        for exe in exe_paths:
-            if os.path.exists(exe):
-                return subprocess.Popen([exe], cwd=current_dir, env=env)
-        raise FileNotFoundError("No se encontró SingleSwitchMapperApp.exe ni SingleGamepadMapperApp.exe")
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        pad = GamepadManager()
+        pad.initialize()
+        arg = sys.argv[1].lower()
+        if "--single" in arg:
+            pad.show_single_config_dialog()
+        elif "--multi" in arg:
+            pad.show_config_dialog()
+        else:
+            pad.show_single_switch_config_dialog()
+        pad.shutdown()

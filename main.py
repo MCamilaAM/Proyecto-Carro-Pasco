@@ -10,7 +10,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8')
 
 # ID predeterminado del robot (se conecta automáticamente sin pedir input)
-DEFAULT_PASCO_ID = "438-576"
+DEFAULT_PASCO_ID = "438-831"
 
 # Configuración de Joystick y Velocidad de Motores
 DEADZONE = 0.10        # Zona muerta inicial
