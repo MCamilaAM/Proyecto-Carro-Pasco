@@ -24,14 +24,4 @@ build/
 *.ilk
 *.pdb
 
-# Qt deployment extras
-generic/
-iconengines/
-imageformats/
-networkinformation/
-styles/
-tls/
-Qt6*.dll
-D3Dcompiler_47.dll
-opengl32sw.dll
 
