@@ -23,7 +23,7 @@ except ImportError:
 
 
 # Constantes de control
-DEFAULT_PASCO_ID = "438-831"
+DEFAULT_PASCO_ID = "438-576"
 DEADZONE = 0.10
 MAX_THRESHOLD = 0.75
 MAX_SPEED = 720
