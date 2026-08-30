@@ -1,7 +1,7 @@
 @echo off
 title Mapeador y Calibrador de Mandos
-if exist "SingleSwitchMapperApp.exe" (
-    start "" SingleSwitchMapperApp.exe
+if exist "GamepadMapperApp.exe" (
+    start "" GamepadMapperApp.exe
 ) else (
-    start "" python gamepad_mapper.py --switch
+    start "" python gamepad_mapper.py --multi
 )

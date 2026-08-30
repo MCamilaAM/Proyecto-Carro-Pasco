@@ -12,7 +12,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from gamepad_mapper import GamepadManager, Button, Stick, Trigger, ControllerType
+from gamepad_mapper import GamepadManager, Button, Stick, Trigger, ControllerType, StickState, TriggerState
 
 # Importar PascoBot si está disponible
 try:
@@ -155,9 +155,9 @@ class VisualGamepadApp:
         btn_bar = tk.Frame(left_col, bg="#282a36")
         btn_bar.pack(fill=tk.X, pady=(10, 0))
 
-        cfg_switch_btn = tk.Button(
+        cfg_multi_btn = tk.Button(
             btn_bar,
-            text="⚙️ Mapeo de Mandos (Switch / Xbox / PS)",
+            text="⚙️ Configurar y Calibrar Mandos (Multi-Mando)",
             font=("Segoe UI", 10, "bold"),
             bg="#bd93f9",
             fg="#ffffff",
@@ -165,23 +165,9 @@ class VisualGamepadApp:
             relief=tk.FLAT,
             padx=10,
             pady=6,
-            command=lambda: self._open_qt_config("switch")
-        )
-        cfg_switch_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-
-        cfg_multi_btn = tk.Button(
-            btn_bar,
-            text="🎮 Multi-Mando",
-            font=("Segoe UI", 9),
-            bg="#6272a4",
-            fg="#ffffff",
-            activebackground="#bd93f9",
-            relief=tk.FLAT,
-            padx=8,
-            pady=6,
             command=lambda: self._open_qt_config("multi")
         )
-        cfg_multi_btn.pack(side=tk.RIGHT, fill=tk.X, expand=False)
+        cfg_multi_btn.pack(fill=tk.X, expand=True)
 
         # Right Column: PASCO Robot Controls & Telemetry
         right_col = tk.LabelFrame(
@@ -279,8 +265,8 @@ class VisualGamepadApp:
         )
         stop_btn.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
 
-    def _open_qt_config(self, mode="switch"):
-        """Lanza la ventana Qt de mapeo en un subproceso independiente y recarga la configuracion al terminar."""
+    def _open_qt_config(self, mode="multi"):
+        """Lanza la ventana Qt de mapeo multimando en un subproceso independiente y recarga la configuracion al terminar."""
         def run_and_reload():
             try:
                 proc = GamepadManager.launch_config_process(mode)
@@ -371,95 +357,107 @@ class VisualGamepadApp:
         self._poll_step()
 
     def _poll_step(self):
-        # 1. Actualizar GamepadMapper
-        self.pad.update()
-        is_pad_connected = self.pad.is_connected(0)
+        try:
+            # 1. Actualizar GamepadMapper
+            self.pad.update()
 
-        # 2. Leer estado del mando
-        left_stick = self.pad.get_stick(0, Stick.LEFT) if is_pad_connected else StickState()
-        right_stick = self.pad.get_stick(0, Stick.RIGHT) if is_pad_connected else StickState()
-        lt = self.pad.get_trigger(0, Trigger.LEFT) if is_pad_connected else TriggerState()
-        rt = self.pad.get_trigger(0, Trigger.RIGHT) if is_pad_connected else TriggerState()
+            # Detectar si hay algún jugador (0 a 7) conectado
+            active_player = 0
+            is_pad_connected = False
+            for p in range(8):
+                if self.pad.is_connected(p):
+                    active_player = p
+                    is_pad_connected = True
+                    break
 
-        # Botones
-        btns = {}
-        for btn in Button:
-            btns[btn] = self.pad.is_button_pressed(0, btn) if is_pad_connected else False
+            # 2. Leer estado del mando
+            left_stick = self.pad.get_stick(active_player, Stick.LEFT) if is_pad_connected else StickState()
+            right_stick = self.pad.get_stick(active_player, Stick.RIGHT) if is_pad_connected else StickState()
+            lt = self.pad.get_trigger(active_player, Trigger.LEFT) if is_pad_connected else TriggerState()
+            rt = self.pad.get_trigger(active_player, Trigger.RIGHT) if is_pad_connected else TriggerState()
 
-        # 3. Lógica de Control PASCO
-        if is_pad_connected:
-            forward = normalize_axis(left_stick.y, DEADZONE, MAX_THRESHOLD)
-            turn = normalize_axis(right_stick.x, DEADZONE, MAX_THRESHOLD)
+            # Botones
+            btns = {}
+            for btn in Button:
+                btns[btn] = self.pad.is_button_pressed(active_player, btn) if is_pad_connected else False
 
-            if forward != 0.0 or turn != 0.0:
-                self.vel_a, self.vel_b = calculate_split_stick_drive(forward, turn, MAX_SPEED)
-            else:
-                self.vel_a = 0
-                self.vel_b = 0
+            # 3. Lógica de Control PASCO
+            if is_pad_connected:
+                forward = normalize_axis(left_stick.y, DEADZONE, MAX_THRESHOLD)
+                turn = normalize_axis(right_stick.x, DEADZONE, MAX_THRESHOLD)
 
-            # Gatillos / Pinza
-            rt_pressed = btns[Button.ZR] or rt.pressed or (rt.value > 0.2)
-            lt_pressed = btns[Button.ZL] or lt.pressed or (lt.value > 0.2)
-            rb_pressed = btns[Button.R]
-            lb_pressed = btns[Button.L]
-
-            step_lift = SERVO_STEP if not INVERT_LIFT else -SERVO_STEP
-            if rt_pressed:
-                self.lift_angle = min(LIFT_MAX, max(LIFT_MIN, self.lift_angle + step_lift))
-            elif lt_pressed:
-                self.lift_angle = min(LIFT_MAX, max(LIFT_MIN, self.lift_angle - step_lift))
-
-            step_pinza = SERVO_STEP if not INVERT_PINZA else -SERVO_STEP
-            if rb_pressed:
-                self.pinza_angle = min(PINZA_MAX, max(PINZA_MIN, self.pinza_angle + step_pinza))
-            elif lb_pressed:
-                self.pinza_angle = min(PINZA_MAX, max(PINZA_MIN, self.pinza_angle - step_pinza))
-
-            # Enviar a Robot PASCO si está conectado y habilitado
-            if self.bot_connected and self.enable_robot_output.get() and self.bot:
-                # Servos
-                now = time.time()
-                if (self.lift_angle != self.last_lift or self.pinza_angle != self.last_pinza) and (now - self.last_servo_send >= SERVO_UPDATE_INTERVAL):
-                    try:
-                        s1 = self.lift_angle if not SWAP_SERVO_PORTS else self.pinza_angle
-                        s2 = self.pinza_angle if not SWAP_SERVO_PORTS else self.lift_angle
-                        self.bot.set_servos("standard", s1, "standard", s2)
-                        self.last_lift = self.lift_angle
-                        self.last_pinza = self.pinza_angle
-                        self.last_servo_send = now
-                    except Exception:
-                        pass
-
-                # Motores paso a paso
-                if self.vel_a != 0 or self.vel_b != 0:
-                    if self.vel_a != self.last_vel_a or self.vel_b != self.last_vel_b or not self.is_moving:
-                        try:
-                            self.bot.rotate_steppers_continuously(self.vel_a, ACCEL, self.vel_b, ACCEL)
-                            self.last_vel_a = self.vel_a
-                            self.last_vel_b = self.vel_b
-                            self.is_moving = True
-                        except Exception:
-                            pass
+                if forward != 0.0 or turn != 0.0:
+                    self.vel_a, self.vel_b = calculate_split_stick_drive(forward, turn, MAX_SPEED)
                 else:
-                    if self.is_moving:
+                    self.vel_a = 0
+                    self.vel_b = 0
+
+                # Gatillos / Pinza
+                rt_pressed = btns[Button.ZR] or rt.pressed or (rt.value > 0.2)
+                lt_pressed = btns[Button.ZL] or lt.pressed or (lt.value > 0.2)
+                rb_pressed = btns[Button.R]
+                lb_pressed = btns[Button.L]
+
+                step_lift = SERVO_STEP if not INVERT_LIFT else -SERVO_STEP
+                if rt_pressed:
+                    self.lift_angle = min(LIFT_MAX, max(LIFT_MIN, self.lift_angle + step_lift))
+                elif lt_pressed:
+                    self.lift_angle = min(LIFT_MAX, max(LIFT_MIN, self.lift_angle - step_lift))
+
+                step_pinza = SERVO_STEP if not INVERT_PINZA else -SERVO_STEP
+                if rb_pressed:
+                    self.pinza_angle = min(PINZA_MAX, max(PINZA_MIN, self.pinza_angle + step_pinza))
+                elif lb_pressed:
+                    self.pinza_angle = min(PINZA_MAX, max(PINZA_MIN, self.pinza_angle - step_pinza))
+
+                # Enviar a Robot PASCO si está conectado y habilitado
+                if self.bot_connected and self.enable_robot_output.get() and self.bot:
+                    # Servos
+                    now = time.time()
+                    if (self.lift_angle != self.last_lift or self.pinza_angle != self.last_pinza) and (now - self.last_servo_send >= SERVO_UPDATE_INTERVAL):
                         try:
-                            self.bot.stop_steppers(ACCEL, ACCEL)
-                            self.last_vel_a = 0
-                            self.last_vel_b = 0
-                            self.is_moving = False
+                            s1 = self.lift_angle if not SWAP_SERVO_PORTS else self.pinza_angle
+                            s2 = self.pinza_angle if not SWAP_SERVO_PORTS else self.lift_angle
+                            self.bot.set_servos("standard", s1, "standard", s2)
+                            self.last_lift = self.lift_angle
+                            self.last_pinza = self.pinza_angle
+                            self.last_servo_send = now
                         except Exception:
                             pass
 
-        # 4. Actualizar UI y Dibujar Canvas del Mando
-        self._update_telemetry_ui(is_pad_connected)
-        self._draw_gamepad_canvas(left_stick, right_stick, lt, rt, btns, is_pad_connected)
+                    # Motores paso a paso
+                    if self.vel_a != 0 or self.vel_b != 0:
+                        if self.vel_a != self.last_vel_a or self.vel_b != self.last_vel_b or not self.is_moving:
+                            try:
+                                self.bot.rotate_steppers_continuously(self.vel_a, ACCEL, self.vel_b, ACCEL)
+                                self.last_vel_a = self.vel_a
+                                self.last_vel_b = self.vel_b
+                                self.is_moving = True
+                            except Exception:
+                                pass
+                    else:
+                        if self.is_moving:
+                            try:
+                                self.bot.stop_steppers(ACCEL, ACCEL)
+                                self.last_vel_a = 0
+                                self.last_vel_b = 0
+                                self.is_moving = False
+                            except Exception:
+                                pass
 
-        # Repetir a ~60 FPS (16 ms)
-        self.root.after(16, self._poll_step)
+            # 4. Actualizar UI y Dibujar Canvas del Mando
+            self._update_telemetry_ui(is_pad_connected, active_player)
+            self._draw_gamepad_canvas(left_stick, right_stick, lt, rt, btns, is_pad_connected)
 
-    def _update_telemetry_ui(self, is_pad_connected):
+        except Exception as e:
+            print(f"Error en _poll_step: {e}")
+        finally:
+            # Repetir a ~60 FPS (16 ms) de forma garantizada
+            self.root.after(16, self._poll_step)
+
+    def _update_telemetry_ui(self, is_pad_connected, player_idx=0):
         if is_pad_connected:
-            self.status_badge.config(text="● MANDO CONECTADO (JUGADOR 1)", fg="#50fa7b")
+            self.status_badge.config(text=f"● MANDO CONECTADO (JUGADOR {player_idx + 1})", fg="#50fa7b")
         else:
             self.status_badge.config(text="● ESPERANDO MANDO", fg="#ffb86c")
 
