@@ -223,6 +223,9 @@ def _load_sdl3_dll():
         if os.path.exists(p):
             try:
                 sdl = ctypes.CDLL(p)
+                sdl.SDL_SetHint.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+                sdl.SDL_SetHint.restype = ctypes.c_bool
+
                 sdl.SDL_Init.argtypes = [ctypes.c_uint32]
                 sdl.SDL_Init.restype = ctypes.c_bool
 
@@ -247,6 +250,9 @@ def _load_sdl3_dll():
                 sdl.SDL_RumbleGamepad.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint32]
                 sdl.SDL_RumbleGamepad.restype = ctypes.c_bool
 
+                sdl.SDL_PollEvent.argtypes = [ctypes.c_void_p]
+                sdl.SDL_PollEvent.restype = ctypes.c_bool
+
                 sdl.SDL_PumpEvents.argtypes = []
                 sdl.SDL_PumpEvents.restype = None
 
@@ -263,6 +269,7 @@ class GamepadManager:
     _dll = None
     _sdl = None
     _sdl_gamepads = {}
+    _event_buf = ctypes.c_buffer(128)
 
     def __new__(cls):
         if cls._instance is None:
@@ -342,6 +349,9 @@ class GamepadManager:
         self._sdl = _load_sdl3_dll()
         if self._sdl:
             try:
+                self._sdl.SDL_SetHint(b"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", b"1")
+                self._sdl.SDL_SetHint(b"SDL_JOYSTICK_RAWINPUT", b"1")
+                self._sdl.SDL_SetHint(b"SDL_JOYSTICK_THREAD", b"1")
                 self._sdl.SDL_Init(0x00000200 | 0x00000008) # SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD
                 self._refresh_sdl_gamepads()
             except Exception:
@@ -363,10 +373,66 @@ class GamepadManager:
         except Exception:
             pass
 
+    _player_ports = {}
+
+    def _reload_ini_ports(self):
+        ini_path = os.path.join(os.environ.get("LOCALAPPDATA", ""), "GamepadMapper", "gamepad_mapper.ini")
+        self._player_ports.clear()
+        if os.path.exists(ini_path):
+            try:
+                with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("player_") and "_connected=" in line:
+                            parts = line.split("=")
+                            p_idx = int(parts[0].replace("player_", "").replace("_connected", ""))
+                            conn = parts[1].strip().lower() == "true"
+                            if p_idx not in self._player_ports:
+                                self._player_ports[p_idx] = {"connected": conn, "port": p_idx}
+                            else:
+                                self._player_ports[p_idx]["connected"] = conn
+                        elif line.startswith("player_") and ("_lstick=" in line or "_button_a=" in line):
+                            parts = line.split("=", 1)
+                            p_idx = int(parts[0].replace("player_", "").split("_")[0])
+                            val = parts[1].strip().strip('"')
+                            if "port:" in val:
+                                port_str = val.split("port:")[1].split(",")[0]
+                                try:
+                                    port_num = int(port_str)
+                                    if p_idx not in self._player_ports:
+                                        self._player_ports[p_idx] = {"connected": True, "port": port_num}
+                                    else:
+                                        self._player_ports[p_idx]["port"] = port_num
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+
+    def _get_player_pad(self, player: int):
+        if not self._sdl:
+            return None
+        # Look up mapped port for this player
+        info = self._player_ports.get(player)
+        if info:
+            if not info.get("connected", True):
+                return None
+            port = info.get("port", player)
+            if port in self._sdl_gamepads:
+                return self._sdl_gamepads[port]
+        # Fallback 1: direct player index
+        if player in self._sdl_gamepads:
+            return self._sdl_gamepads[player]
+        # Fallback 2: if only 1 physical gamepad is connected and player is connected in INI
+        if 0 in self._sdl_gamepads and len(self._sdl_gamepads) == 1:
+            if info is None or info.get("connected", True):
+                return self._sdl_gamepads[0]
+        return None
+
     def initialize(self) -> bool:
         """Inicializa los controladores de entrada y hardware (SDL3/Joy-Cons)."""
         ok = bool(self._dll.gamepad_initialize())
         self._refresh_sdl_gamepads()
+        self._reload_ini_ports()
         return ok
 
     def shutdown(self):
@@ -382,21 +448,26 @@ class GamepadManager:
 
     def update(self):
         """Procesa eventos de hardware y actualiza el estado de los mandos. Llamar en cada iteración."""
-        self._dll.gamepad_update()
         if self._sdl:
             self._sdl.SDL_PumpEvents()
+            while self._sdl.SDL_PollEvent(self._event_buf):
+                pass
             if not self._sdl_gamepads:
                 self._refresh_sdl_gamepads()
+        self._dll.gamepad_update()
 
     def reload(self):
         """Recarga todas las configuraciones guardadas en disco y actualiza los dispositivos inmediatamente."""
         self._dll.gamepad_reload()
         self._refresh_sdl_gamepads()
+        self._reload_ini_ports()
 
     def is_connected(self, player: int = 0) -> bool:
         """Verifica si el jugador (0..7) tiene un mando conectado."""
-        if self._sdl and player in self._sdl_gamepads:
-            return True
+        if self._sdl:
+            pad = self._get_player_pad(player)
+            if pad:
+                return True
         return bool(self._dll.gamepad_is_connected(player))
 
     def get_type(self, player: int = 0) -> ControllerType:
@@ -406,51 +477,53 @@ class GamepadManager:
     def is_button_pressed(self, player: int, button: Button | int) -> bool:
         """Verifica si un botón específico está presionado."""
         b_idx = int(button)
-        if self._sdl and player in self._sdl_gamepads:
-            pad = self._sdl_gamepads[player]
-            mapping = {
-                Button.A: 0,
-                Button.B: 1,
-                Button.X: 2,
-                Button.Y: 3,
-                Button.LSTICK: 7,
-                Button.RSTICK: 8,
-                Button.L: 9,
-                Button.R: 10,
-                Button.PLUS: 6,
-                Button.MINUS: 4,
-                Button.DUP: 11,
-                Button.DDOWN: 12,
-                Button.DLEFT: 13,
-                Button.DRIGHT: 14,
-                Button.HOME: 5,
-                Button.SCREENSHOT: 15,
-            }
-            if b_idx in mapping:
-                if self._sdl.SDL_GetGamepadButton(pad, mapping[b_idx]):
-                    return True
+        if self._sdl:
+            pad = self._get_player_pad(player)
+            if pad:
+                mapping = {
+                    Button.A: 0,
+                    Button.B: 1,
+                    Button.X: 2,
+                    Button.Y: 3,
+                    Button.LSTICK: 7,
+                    Button.RSTICK: 8,
+                    Button.L: 9,
+                    Button.R: 10,
+                    Button.PLUS: 6,
+                    Button.MINUS: 4,
+                    Button.DUP: 11,
+                    Button.DDOWN: 12,
+                    Button.DLEFT: 13,
+                    Button.DRIGHT: 14,
+                    Button.HOME: 5,
+                    Button.SCREENSHOT: 15,
+                }
+                if b_idx in mapping:
+                    if self._sdl.SDL_GetGamepadButton(pad, mapping[b_idx]):
+                        return True
 
-            if b_idx == Button.ZL:
-                return self._sdl.SDL_GetGamepadAxis(pad, 4) > 9800
-            elif b_idx == Button.ZR:
-                return self._sdl.SDL_GetGamepadAxis(pad, 5) > 9800
+                if b_idx == Button.ZL:
+                    return self._sdl.SDL_GetGamepadAxis(pad, 4) > 9800
+                elif b_idx == Button.ZR:
+                    return self._sdl.SDL_GetGamepadAxis(pad, 5) > 9800
 
-            return False
+                return False
 
         return bool(self._dll.gamepad_is_button_pressed(player, b_idx))
 
     def get_stick(self, player: int, stick: Stick | int) -> StickState:
         """Obtiene la posición (-1.0 a 1.0) del stick izquierdo o derecho."""
-        if self._sdl and player in self._sdl_gamepads:
-            pad = self._sdl_gamepads[player]
-            if stick == Stick.LEFT:
-                raw_x = self._sdl.SDL_GetGamepadAxis(pad, 0)
-                raw_y = self._sdl.SDL_GetGamepadAxis(pad, 1)
-                return StickState(x=raw_x / 32767.0, y=-raw_y / 32767.0)
-            elif stick == Stick.RIGHT:
-                raw_x = self._sdl.SDL_GetGamepadAxis(pad, 2)
-                raw_y = self._sdl.SDL_GetGamepadAxis(pad, 3)
-                return StickState(x=raw_x / 32767.0, y=-raw_y / 32767.0)
+        if self._sdl:
+            pad = self._get_player_pad(player)
+            if pad:
+                if stick == Stick.LEFT:
+                    raw_x = self._sdl.SDL_GetGamepadAxis(pad, 0)
+                    raw_y = self._sdl.SDL_GetGamepadAxis(pad, 1)
+                    return StickState(x=raw_x / 32767.0, y=-raw_y / 32767.0)
+                elif stick == Stick.RIGHT:
+                    raw_x = self._sdl.SDL_GetGamepadAxis(pad, 2)
+                    raw_y = self._sdl.SDL_GetGamepadAxis(pad, 3)
+                    return StickState(x=raw_x / 32767.0, y=-raw_y / 32767.0)
 
         x = ctypes.c_float()
         y = ctypes.c_float()
@@ -461,12 +534,20 @@ class GamepadManager:
 
     def get_trigger(self, player: int, trigger: Trigger | int) -> TriggerState:
         """Obtiene el estado de un gatillo analógico (0.0 a 1.0 y booleano)."""
-        if self._sdl and player in self._sdl_gamepads:
-            pad = self._sdl_gamepads[player]
-            axis_idx = 4 if trigger == Trigger.LEFT else 5
-            raw = self._sdl.SDL_GetGamepadAxis(pad, axis_idx)
-            norm = max(0.0, min(1.0, raw / 32767.0))
-            return TriggerState(value=norm, pressed=(norm > 0.3))
+        if self._sdl:
+            pad = self._get_player_pad(player)
+            if pad:
+                axis_idx = 4 if trigger == Trigger.LEFT else 5
+                raw = self._sdl.SDL_GetGamepadAxis(pad, axis_idx)
+                norm = max(0.0, min(1.0, raw / 32767.0))
+                return TriggerState(value=norm, pressed=(norm > 0.3))
+
+        val = ctypes.c_float()
+        pressed = ctypes.c_bool()
+        success = self._dll.gamepad_get_trigger(player, int(trigger), ctypes.byref(val), ctypes.byref(pressed))
+        if success:
+            return TriggerState(value=val.value, pressed=pressed.value)
+        return TriggerState()
 
         val = ctypes.c_float()
         pressed = ctypes.c_bool()

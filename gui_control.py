@@ -1,29 +1,23 @@
 # SPDX-License-Identifier: MIT
 """
-Panel de Control Visual con GamepadMapperLib para el Robot PASCO.
-Incluye visualizador gráfico en tiempo real de mandos (palancas, gatillos, botones),
-telemetría del robot PASCO y acceso directo a la ventana de calibración/mapeo Qt.
+Panel de Control Visual Multijugador y Multi-Robot PASCO con GamepadMapperLib.
+Soporta hasta 5 mandos (Jugadores 1 a 5) y hasta 5 robots PASCO //control.Node en simultaneo.
+Incorpora el renderizador de mando ultra-realista con compuertas radiales punteadas,
+acotacion trigonometrica (radial clamping) y telemetria independiente.
 """
 
+import os
 import sys
 import time
 import math
-import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from gamepad_mapper import GamepadManager, Button, Stick, Trigger, ControllerType, StickState, TriggerState
+from gamepad_mapper import GamepadManager, Button, Stick, Trigger, ControllerType, StickState, TriggerState, GamepadState
+from gamepad_renderer import RealisticGamepadCanvas
+from multi_pasco import MultiPascoManager, MAX_ROBOTS
 
-# Importar PascoBot si está disponible
-try:
-    from pasco.pasco_bot import PascoBot
-    PASCO_AVAILABLE = True
-except ImportError:
-    PASCO_AVAILABLE = False
-
-
-# Constantes de control
-DEFAULT_PASCO_ID = "438-576"
+# Parametros de cinemática de los robots
 DEADZONE = 0.10
 MAX_THRESHOLD = 0.75
 MAX_SPEED = 720
@@ -34,14 +28,11 @@ LIFT_MAX = 130
 PINZA_MIN = -130
 PINZA_MAX = 130
 
-SERVO_STEP = 12
-SERVO_UPDATE_INTERVAL = 0.03
-
+SERVO_STEP = 14
+SWAP_SERVO_PORTS = True
 INVERT_DRIVE = False
 INVERT_LIFT = False
 INVERT_PINZA = False
-SWAP_SERVO_PORTS = True
-
 
 def normalize_axis(val, deadzone=0.10, max_threshold=0.75):
     abs_val = abs(val)
@@ -50,7 +41,6 @@ def normalize_axis(val, deadzone=0.10, max_threshold=0.75):
     sign = 1.0 if val > 0 else -1.0
     normalized = (abs_val - deadzone) / (max_threshold - deadzone)
     return sign * min(1.0, max(0.0, normalized))
-
 
 def calculate_split_stick_drive(forward_val, turn_val, max_speed=720):
     if INVERT_DRIVE:
@@ -68,38 +58,24 @@ def calculate_split_stick_drive(forward_val, turn_val, max_speed=720):
     vel_b = int(right_power * max_speed)
     return vel_a, vel_b
 
-
 class VisualGamepadApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("🎮 Panel Visual - Robot PASCO & GamepadMapper")
-        self.root.geometry("980x680")
-        self.root.minsize(880, 620)
-        self.root.configure(bg="#1e1e24")
+        self.root.title("🎮 Robot PASCO // Control Visual & Gamepad Mapper (5 Jugadores - 5 Robots)")
+        self.root.geometry("1180x740")
+        self.root.minsize(1050, 680)
+        self.root.configure(bg="#181a1f")
 
-        # Gamepad Manager
+        # Subsystems
         self.pad = GamepadManager()
         self.pad_initialized = self.pad.initialize()
+        self.pasco_mgr = MultiPascoManager(num_robots=MAX_ROBOTS)
 
-        # Pasco Robot
-        self.bot = PascoBot() if PASCO_AVAILABLE else None
-        self.bot_connected = False
-        self.is_connecting = False
+        # UI Selected Player for Gamepad View (0..4)
+        self.active_view_player = 0
 
-        # Estados de control
-        self.vel_a = 0
-        self.vel_b = 0
-        self.last_vel_a = 0
-        self.last_vel_b = 0
-        self.is_moving = False
-
-        self.lift_angle = 0
-        self.pinza_angle = 0
-        self.last_lift = None
-        self.last_pinza = None
-        self.last_servo_send = 0
-
-        self.enable_robot_output = tk.BooleanVar(value=True)
+        # Robot UI Elements cache
+        self.robot_ui_widgets = {}
 
         self._build_ui()
         self._start_poll_loop()
@@ -108,484 +84,407 @@ class VisualGamepadApp:
         style = ttk.Style()
         style.theme_use("clam")
 
-        # Header Frame
-        header = tk.Frame(self.root, bg="#282a36", height=60)
+        # Configurar colores ttk oscuros
+        style.configure("TCombobox", fieldbackground="#21252b", background="#282c34", foreground="#ffffff", arrowcolor="#50fa7b")
+        style.configure("TCheckbutton", background="#21252b", foreground="#abb2bf")
+
+        # 1. Header Bar
+        header = tk.Frame(self.root, bg="#21252b", height=55)
         header.pack(fill=tk.X, side=tk.TOP)
 
         title_lbl = tk.Label(
             header,
-            text="🎮 ROBOT PASCO // CONTROL VISUAL & GAMEPAD MAPPER",
-            font=("Segoe UI", 14, "bold"),
+            text="🎮 ROBOT PASCO // SISTEMA MULTI-ROBOT & MAPPER 5 PLAYERS",
+            font=("Segoe UI", 13, "bold"),
             fg="#50fa7b",
-            bg="#282a36"
+            bg="#21252b"
         )
-        title_lbl.pack(side=tk.LEFT, padx=20, pady=15)
+        title_lbl.pack(side=tk.LEFT, padx=20, pady=12)
 
-        self.status_badge = tk.Label(
+        self.global_status_badge = tk.Label(
             header,
-            text="● ESPERANDO MANDO",
+            text="● SISTEMA LISTO",
             font=("Segoe UI", 10, "bold"),
-            fg="#ffb86c",
-            bg="#282a36",
-            padx=10
+            fg="#61afef",
+            bg="#21252b",
+            padx=15
         )
-        self.status_badge.pack(side=tk.RIGHT, padx=20)
+        self.global_status_badge.pack(side=tk.RIGHT, padx=20)
 
-        # Main Split Container
-        main_container = tk.Frame(self.root, bg="#1e1e24")
-        main_container.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        # 2. Main Split Container
+        main_container = tk.Frame(self.root, bg="#181a1f")
+        main_container.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
 
-        # Left Column: Gamepad Visualizer (60% width)
+        # Left Column: Gamepad Visualizer (45% width)
         left_col = tk.LabelFrame(
             main_container,
-            text=" 🕹️ Estado del Mando en Tiempo Real ",
+            text=" 🕹️ Visualizador de Mandos en Tiempo Real ",
             font=("Segoe UI", 11, "bold"),
             fg="#8be9fd",
-            bg="#282a36",
+            bg="#21252b",
             padx=10,
-            pady=10
+            pady=8
         )
-        left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
 
-        # Canvas for Gamepad
-        self.canvas = tk.Canvas(left_col, bg="#191a21", highlightthickness=0, height=360)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
+        # Selector de Jugador activo en la vista
+        player_sel_frame = tk.Frame(left_col, bg="#21252b")
+        player_sel_frame.pack(fill=tk.X, pady=(0, 8))
 
-        # Buttons Toolbar underneath canvas
-        btn_bar = tk.Frame(left_col, bg="#282a36")
-        btn_bar.pack(fill=tk.X, pady=(10, 0))
+        tk.Label(player_sel_frame, text="Ver Mando:", font=("Segoe UI", 9, "bold"), fg="#abb2bf", bg="#21252b").pack(side=tk.LEFT, padx=(0, 6))
+        self.player_tabs_frame = tk.Frame(player_sel_frame, bg="#21252b")
+        self.player_tabs_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        cfg_multi_btn = tk.Button(
-            btn_bar,
-            text="⚙️ Configurar y Calibrar Mandos (Multi-Mando)",
+        self.player_tab_btns = []
+        for p in range(MAX_ROBOTS):
+            btn = tk.Button(
+                self.player_tabs_frame,
+                text=f"P{p+1}",
+                font=("Segoe UI", 9, "bold"),
+                bg="#50fa7b" if p == 0 else "#282c34",
+                fg="#000000" if p == 0 else "#abb2bf",
+                activebackground="#61afef",
+                relief=tk.FLAT,
+                width=4,
+                command=lambda p_idx=p: self._select_view_player(p_idx)
+            )
+            btn.pack(side=tk.LEFT, padx=3)
+            self.player_tab_btns.append(btn)
+
+        self.pad_status_lbl = tk.Label(
+            player_sel_frame,
+            text="● Conectado",
+            font=("Segoe UI", 9, "bold"),
+            fg="#50fa7b",
+            bg="#21252b"
+        )
+        self.pad_status_lbl.pack(side=tk.RIGHT, padx=5)
+
+        # Canvas del Mando Ultra-Realista
+        self.gamepad_canvas = tk.Canvas(
+            left_col,
+            bg="#181a1f",
+            highlightthickness=1,
+            highlightbackground="#3b4252",
+            height=370
+        )
+        self.gamepad_canvas.pack(fill=tk.BOTH, expand=True, pady=4)
+        self.renderer = RealisticGamepadCanvas(self.gamepad_canvas)
+
+        # Botón de Configuración Qt
+        cfg_btn = tk.Button(
+            left_col,
+            text="⚙️ Configurar y Calibrar Mandos (Mapper 5 Players)",
             font=("Segoe UI", 10, "bold"),
             bg="#bd93f9",
-            fg="#ffffff",
+            fg="#000000",
             activebackground="#ff79c6",
             relief=tk.FLAT,
-            padx=10,
-            pady=6,
-            command=lambda: self._open_qt_config("multi")
+            height=2,
+            command=self._open_qt_config
         )
-        cfg_multi_btn.pack(fill=tk.X, expand=True)
+        cfg_btn.pack(fill=tk.X, pady=(8, 2))
 
-        # Right Column: PASCO Robot Controls & Telemetry
+        # Right Column: Multi-Robot Management (55% width)
         right_col = tk.LabelFrame(
             main_container,
-            text=" 🤖 Robot PASCO // Conexión y Telemetría ",
+            text=" 🤖 Gestión y Telemetría Multi-Robot (5 //control.Node) ",
             font=("Segoe UI", 11, "bold"),
             fg="#50fa7b",
-            bg="#282a36",
-            padx=12,
-            pady=10,
-            width=360
-        )
-        right_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False)
-        right_col.pack_propagate(False)
-
-        # Connection Box
-        conn_frame = tk.Frame(right_col, bg="#282a36")
-        conn_frame.pack(fill=tk.X, pady=5)
-
-        tk.Label(conn_frame, text="ID Bluetooth:", font=("Segoe UI", 9, "bold"), fg="#f8f8f2", bg="#282a36").pack(anchor=tk.W)
-        id_box = tk.Frame(conn_frame, bg="#282a36")
-        id_box.pack(fill=tk.X, pady=4)
-
-        self.id_entry = tk.Entry(id_box, font=("Segoe UI", 11), bg="#44475a", fg="#ffffff", insertbackground="white")
-        self.id_entry.insert(0, DEFAULT_PASCO_ID)
-        self.id_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-
-        self.connect_btn = tk.Button(
-            id_box,
-            text="Conectar",
-            font=("Segoe UI", 9, "bold"),
-            bg="#50fa7b",
-            fg="#282a36",
-            relief=tk.FLAT,
+            bg="#21252b",
             padx=10,
-            command=self._toggle_connection
+            pady=8
         )
-        self.connect_btn.pack(side=tk.RIGHT)
+        right_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(8, 0))
 
-        self.robot_status_lbl = tk.Label(
-            conn_frame,
-            text="● Robot Desconectado",
-            font=("Segoe UI", 9),
-            fg="#ff5555",
-            bg="#282a36"
-        )
-        self.robot_status_lbl.pack(anchor=tk.W, pady=2)
+        # Scrollable container for robots
+        robots_scroll_frame = tk.Frame(right_col, bg="#21252b")
+        robots_scroll_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Checkbox enable commands
-        chk = tk.Checkbutton(
-            right_col,
-            text="Transmitir comandos al robot físico",
-            variable=self.enable_robot_output,
-            font=("Segoe UI", 9),
-            fg="#f8f8f2",
-            bg="#282a36",
-            selectcolor="#44475a",
-            activebackground="#282a36",
-            activeforeground="#50fa7b"
-        )
-        chk.pack(anchor=tk.W, pady=(5, 10))
+        for slot_idx in range(MAX_ROBOTS):
+            self._create_robot_slot_card(robots_scroll_frame, slot_idx)
 
-        # Telemetry Gauges
-        sep = ttk.Separator(right_col, orient="horizontal")
-        sep.pack(fill=tk.X, pady=6)
+        # Emergency & Global Action Bar
+        action_bar = tk.Frame(right_col, bg="#21252b")
+        action_bar.pack(fill=tk.X, pady=(10, 0))
 
-        tk.Label(right_col, text="TELEMETRÍA DE MOTORES:", font=("Segoe UI", 9, "bold"), fg="#8be9fd", bg="#282a36").pack(anchor=tk.W)
-
-        self.lbl_vel_a = tk.Label(right_col, text="Motor Izquierdo (A): 0 deg/s", font=("Consolas", 10), fg="#f8f8f2", bg="#282a36")
-        self.lbl_vel_a.pack(anchor=tk.W, pady=1)
-        self.lbl_vel_b = tk.Label(right_col, text="Motor Derecho (B):   0 deg/s", font=("Consolas", 10), fg="#f8f8f2", bg="#282a36")
-        self.lbl_vel_b.pack(anchor=tk.W, pady=1)
-
-        sep2 = ttk.Separator(right_col, orient="horizontal")
-        sep2.pack(fill=tk.X, pady=8)
-
-        tk.Label(right_col, text="POSICIÓN DE SERVOMOTORES:", font=("Segoe UI", 9, "bold"), fg="#ffb86c", bg="#282a36").pack(anchor=tk.W)
-
-        self.lbl_lift = tk.Label(right_col, text="Elevación:   0° [RT/LT]", font=("Consolas", 10), fg="#f8f8f2", bg="#282a36")
-        self.lbl_lift.pack(anchor=tk.W, pady=1)
-
-        self.lbl_pinza = tk.Label(right_col, text="Pinza:       0° [RB/LB]", font=("Consolas", 10), fg="#f8f8f2", bg="#282a36")
-        self.lbl_pinza.pack(anchor=tk.W, pady=1)
-
-        # Emergency Stop
-        stop_btn = tk.Button(
-            right_col,
-            text="🛑 PARADA DE EMERGENCIA",
-            font=("Segoe UI", 10, "bold"),
+        self.btn_stop_all = tk.Button(
+            action_bar,
+            text="🛑 PARADA DE EMERGENCIA TOTAL",
+            font=("Segoe UI", 11, "bold"),
             bg="#ff5555",
             fg="#ffffff",
+            activebackground="#ff6e6e",
             relief=tk.FLAT,
-            pady=8,
+            height=2,
             command=self._emergency_stop
         )
-        stop_btn.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+        self.btn_stop_all.pack(fill=tk.X)
 
-    def _open_qt_config(self, mode="multi"):
-        """Lanza la ventana Qt de mapeo multimando en un subproceso independiente y recarga la configuracion al terminar."""
-        def run_and_reload():
-            try:
-                proc = GamepadManager.launch_config_process(mode)
-                if proc:
-                    proc.wait()
-                    # Recargar la configuracion en GamepadMapper inmediatamente
-                    self.root.after(0, self.pad.reload)
-            except Exception as e:
-                print(f"Error al abrir configurador Qt: {e}")
+    def _create_robot_slot_card(self, parent, slot_idx: int):
+        slot = self.pasco_mgr.get_slot(slot_idx)
+        card = tk.Frame(parent, bg="#282c34", highlightthickness=1, highlightbackground="#3b4252", padx=8, pady=6)
+        card.pack(fill=tk.X, pady=4)
 
-        threading.Thread(target=run_and_reload, daemon=True).start()
+        # Header fila
+        top_row = tk.Frame(card, bg="#282c34")
+        top_row.pack(fill=tk.X)
 
-    def _toggle_connection(self):
-        if self.bot_connected:
-            self._disconnect_robot()
-        else:
-            self._connect_robot()
+        title_lbl = tk.Label(
+            top_row,
+            text=f"Robot #{slot_idx + 1}",
+            font=("Segoe UI", 10, "bold"),
+            fg="#61afef",
+            bg="#282c34"
+        )
+        title_lbl.pack(side=tk.LEFT)
 
-    def _connect_robot(self):
-        if not PASCO_AVAILABLE:
-            messagebox.showerror("Error", "El paquete pasco no está instalado.")
+        status_lbl = tk.Label(
+            top_row,
+            text="● Desconectado",
+            font=("Segoe UI", 8, "bold"),
+            fg="#7b88a1",
+            bg="#282c34"
+        )
+        status_lbl.pack(side=tk.LEFT, padx=10)
+
+        # Enable Checkbox
+        enable_var = tk.BooleanVar(value=True)
+        def _on_enable_toggle():
+            self.pasco_mgr.set_enabled(slot_idx, enable_var.get())
+        
+        chk = tk.Checkbutton(
+            top_row,
+            text="Tx Habilitada",
+            variable=enable_var,
+            font=("Segoe UI", 8),
+            bg="#282c34",
+            fg="#abb2bf",
+            activebackground="#282c34",
+            selectcolor="#21252b",
+            command=_on_enable_toggle
+        )
+        chk.pack(side=tk.RIGHT)
+
+        # Controles fila
+        ctrl_row = tk.Frame(card, bg="#282c34")
+        ctrl_row.pack(fill=tk.X, pady=(4, 2))
+
+        tk.Label(ctrl_row, text="ID BLE:", font=("Segoe UI", 8), fg="#abb2bf", bg="#282c34").pack(side=tk.LEFT)
+        id_entry = tk.Entry(ctrl_row, width=8, font=("Consolas", 9, "bold"), bg="#181a1f", fg="#50fa7b", insertbackground="#ffffff", relief=tk.FLAT)
+        id_entry.insert(0, slot.pasco_id if slot else f"438-00{slot_idx+1}")
+        id_entry.pack(side=tk.LEFT, padx=(4, 10))
+
+        tk.Label(ctrl_row, text="Mando:", font=("Segoe UI", 8), fg="#abb2bf", bg="#282c34").pack(side=tk.LEFT)
+        player_combo = ttk.Combobox(ctrl_row, values=[f"Jugador {i+1}" for i in range(MAX_ROBOTS)], width=9, state="readonly")
+        player_combo.current(slot_idx)
+        def _on_player_change(event):
+            self.pasco_mgr.set_player_mapping(slot_idx, player_combo.current())
+        player_combo.bind("<<ComboboxSelected>>", _on_player_change)
+        player_combo.pack(side=tk.LEFT, padx=(4, 10))
+
+        # Connect / Disconnect button
+        conn_btn = tk.Button(
+            ctrl_row,
+            text="Conectar",
+            font=("Segoe UI", 8, "bold"),
+            bg="#50fa7b",
+            fg="#000000",
+            activebackground="#8be9fd",
+            relief=tk.FLAT,
+            padx=8,
+            command=lambda s_idx=slot_idx: self._toggle_robot_connect(s_idx)
+        )
+        conn_btn.pack(side=tk.RIGHT)
+
+        # Telemetría fila
+        telem_row = tk.Frame(card, bg="#282c34")
+        telem_row.pack(fill=tk.X, pady=(2, 0))
+
+        mot_lbl = tk.Label(telem_row, text="Motores: A=0 deg/s | B=0 deg/s", font=("Consolas", 8), fg="#6272a4", bg="#282c34")
+        mot_lbl.pack(side=tk.LEFT)
+
+        servo_lbl = tk.Label(telem_row, text="Elev: -98° | Pinza: +70°", font=("Consolas", 8), fg="#6272a4", bg="#282c34")
+        servo_lbl.pack(side=tk.RIGHT)
+
+        self.robot_ui_widgets[slot_idx] = {
+            "status_lbl": status_lbl,
+            "id_entry": id_entry,
+            "player_combo": player_combo,
+            "conn_btn": conn_btn,
+            "mot_lbl": mot_lbl,
+            "servo_lbl": servo_lbl,
+            "enable_var": enable_var
+        }
+
+    def _select_view_player(self, player_idx: int):
+        self.active_view_player = player_idx
+        for i, btn in enumerate(self.player_tab_btns):
+            if i == player_idx:
+                btn.config(bg="#50fa7b", fg="#000000")
+            else:
+                btn.config(bg="#282c34", fg="#abb2bf")
+
+    def _toggle_robot_connect(self, slot_idx: int):
+        slot = self.pasco_mgr.get_slot(slot_idx)
+        w = self.robot_ui_widgets.get(slot_idx)
+        if not slot or not w:
             return
 
-        target_id = self.id_entry.get().strip()
-        if not target_id:
-            target_id = DEFAULT_PASCO_ID
+        if slot.connected:
+            w["conn_btn"].config(text="Desconectando...", state=tk.DISABLED)
+            def _on_disconn(s_id):
+                self.root.after(0, lambda: self._update_slot_ui_after_conn(s_id))
+            self.pasco_mgr.disconnect_async(slot_idx, _on_disconn)
+        else:
+            pasco_id = w["id_entry"].get().strip()
+            self.pasco_mgr.set_pasco_id(slot_idx, pasco_id)
+            w["conn_btn"].config(text="Conectando...", state=tk.DISABLED, bg="#ffb86c")
+            w["status_lbl"].config(text="● Conectando...", fg="#ffb86c")
+            def _on_conn(s_id, success, msg):
+                self.root.after(0, lambda: self._update_slot_ui_after_conn(s_id))
+            self.pasco_mgr.connect_async(slot_idx, _on_conn)
 
-        if len(target_id) == 6 and '-' not in target_id:
-            target_id = f"{target_id[:3]}-{target_id[3:]}"
+    def _update_slot_ui_after_conn(self, slot_idx: int):
+        slot = self.pasco_mgr.get_slot(slot_idx)
+        w = self.robot_ui_widgets.get(slot_idx)
+        if not slot or not w:
+            return
 
-        self.is_connecting = True
-        self.connect_btn.config(text="Conectando...", state=tk.DISABLED, bg="#ffb86c")
-        self.robot_status_lbl.config(text="● Conectando por Bluetooth...", fg="#ffb86c")
+        w["conn_btn"].config(state=tk.NORMAL)
+        if slot.connected:
+            w["conn_btn"].config(text="Desconectar", bg="#ff5555", fg="#ffffff")
+            w["status_lbl"].config(text=f"● Conectado ({slot.pasco_id})", fg="#50fa7b")
+        else:
+            w["conn_btn"].config(text="Conectar", bg="#50fa7b", fg="#000000")
+            w["status_lbl"].config(text=f"● {slot.status_msg}", fg="#ff5555" if "Error" in slot.status_msg else "#7b88a1")
 
-        def task():
-            try:
-                self.bot.connect_by_id(target_id)
-                self.bot_connected = True
-                self.root.after(0, self._on_connect_success, target_id)
-            except Exception as e:
-                # Intentar escanear
-                try:
-                    devs = self.bot.scan()
-                    if devs:
-                        self.bot.connect(devs[0])
-                        self.bot_connected = True
-                        self.root.after(0, self._on_connect_success, devs[0].name)
-                        return
-                except Exception:
-                    pass
-                self.root.after(0, self._on_connect_fail, str(e))
-
-        threading.Thread(target=task, daemon=True).start()
-
-    def _on_connect_success(self, dev_name):
-        self.is_connecting = False
-        self.connect_btn.config(text="Desconectar", state=tk.NORMAL, bg="#ff5555", fg="#ffffff")
-        self.robot_status_lbl.config(text=f"● Conectado a {dev_name}", fg="#50fa7b")
-
-    def _on_connect_fail(self, err):
-        self.is_connecting = False
-        self.bot_connected = False
-        self.connect_btn.config(text="Conectar", state=tk.NORMAL, bg="#50fa7b", fg="#282a36")
-        self.robot_status_lbl.config(text="❌ Error de conexión", fg="#ff5555")
-        messagebox.showerror("Error Bluetooth", f"No se pudo conectar al robot PASCO:\n{err}")
-
-    def _disconnect_robot(self):
-        if self.bot and self.bot_connected:
-            try:
-                self.bot.disconnect()
-            except Exception:
-                pass
-        self.bot_connected = False
-        self.connect_btn.config(text="Conectar", state=tk.NORMAL, bg="#50fa7b", fg="#282a36")
-        self.robot_status_lbl.config(text="● Robot Desconectado", fg="#ff5555")
+    def _open_qt_config(self):
+        proc = GamepadManager.launch_config_process("multi")
+        import threading
+        def _wait_and_reload():
+            if proc:
+                proc.wait()
+            self.root.after(0, self.pad.reload)
+        threading.Thread(target=_wait_and_reload, daemon=True).start()
 
     def _emergency_stop(self):
-        self.vel_a = 0
-        self.vel_b = 0
-        if self.bot and self.bot_connected:
-            try:
-                self.bot.stop_steppers(ACCEL, ACCEL)
-                self.is_moving = False
-            except Exception:
-                pass
+        self.pasco_mgr.emergency_stop_all()
 
     def _start_poll_loop(self):
         self._poll_step()
 
     def _poll_step(self):
         try:
-            # 1. Actualizar GamepadMapper
+            # 1. Actualizar estado del GamepadManager
             self.pad.update()
 
-            # Detectar si hay algún jugador (0 a 7) conectado
-            active_player = 0
-            is_pad_connected = False
-            for p in range(8):
-                if self.pad.is_connected(p):
-                    active_player = p
-                    is_pad_connected = True
-                    break
+            self._frame_count = getattr(self, "_frame_count", 0) + 1
+            if self._frame_count % 30 == 0:
+                self.pad.reload()
 
-            # 2. Leer estado del mando
-            left_stick = self.pad.get_stick(active_player, Stick.LEFT) if is_pad_connected else StickState()
-            right_stick = self.pad.get_stick(active_player, Stick.RIGHT) if is_pad_connected else StickState()
-            lt = self.pad.get_trigger(active_player, Trigger.LEFT) if is_pad_connected else TriggerState()
-            rt = self.pad.get_trigger(active_player, Trigger.RIGHT) if is_pad_connected else TriggerState()
+            # 2. Procesar cada uno de los 5 Jugadores
+            player_states = {}
+            for p in range(MAX_ROBOTS):
+                state = self.pad.get_state(p)
+                player_states[p] = state
 
-            # Botones
-            btns = {}
-            for btn in Button:
-                btns[btn] = self.pad.is_button_pressed(active_player, btn) if is_pad_connected else False
+            # 3. Enrutar y transmitir a los robots asignados
+            for slot_idx in range(MAX_ROBOTS):
+                slot = self.pasco_mgr.get_slot(slot_idx)
+                if not slot:
+                    continue
 
-            # 3. Lógica de Control PASCO
-            if is_pad_connected:
-                forward = normalize_axis(left_stick.y, DEADZONE, MAX_THRESHOLD)
-                turn = normalize_axis(right_stick.x, DEADZONE, MAX_THRESHOLD)
+                assigned_player = slot.player_idx
+                p_state = player_states.get(assigned_player, GamepadState())
 
-                if forward != 0.0 or turn != 0.0:
-                    self.vel_a, self.vel_b = calculate_split_stick_drive(forward, turn, MAX_SPEED)
-                else:
-                    self.vel_a = 0
-                    self.vel_b = 0
+                if slot.connected and slot.enabled and p_state.is_connected:
+                    ls_y = p_state.left_stick.y if p_state.left_stick else 0.0
+                    rs_x = p_state.right_stick.x if p_state.right_stick else 0.0
 
-                # Gatillos / Pinza
-                rt_pressed = btns[Button.ZR] or rt.pressed or (rt.value > 0.2)
-                lt_pressed = btns[Button.ZL] or lt.pressed or (lt.value > 0.2)
-                rb_pressed = btns[Button.R]
-                lb_pressed = btns[Button.L]
+                    forward = normalize_axis(ls_y, DEADZONE, MAX_THRESHOLD)
+                    turn = normalize_axis(rs_x, DEADZONE, MAX_THRESHOLD)
 
-                step_lift = SERVO_STEP if not INVERT_LIFT else -SERVO_STEP
-                if rt_pressed:
-                    self.lift_angle = min(LIFT_MAX, max(LIFT_MIN, self.lift_angle + step_lift))
-                elif lt_pressed:
-                    self.lift_angle = min(LIFT_MAX, max(LIFT_MIN, self.lift_angle - step_lift))
-
-                step_pinza = SERVO_STEP if not INVERT_PINZA else -SERVO_STEP
-                if rb_pressed:
-                    self.pinza_angle = min(PINZA_MAX, max(PINZA_MIN, self.pinza_angle + step_pinza))
-                elif lb_pressed:
-                    self.pinza_angle = min(PINZA_MAX, max(PINZA_MIN, self.pinza_angle - step_pinza))
-
-                # Enviar a Robot PASCO si está conectado y habilitado
-                if self.bot_connected and self.enable_robot_output.get() and self.bot:
-                    # Servos
-                    now = time.time()
-                    if (self.lift_angle != self.last_lift or self.pinza_angle != self.last_pinza) and (now - self.last_servo_send >= SERVO_UPDATE_INTERVAL):
-                        try:
-                            s1 = self.lift_angle if not SWAP_SERVO_PORTS else self.pinza_angle
-                            s2 = self.pinza_angle if not SWAP_SERVO_PORTS else self.lift_angle
-                            self.bot.set_servos("standard", s1, "standard", s2)
-                            self.last_lift = self.lift_angle
-                            self.last_pinza = self.pinza_angle
-                            self.last_servo_send = now
-                        except Exception:
-                            pass
-
-                    # Motores paso a paso
-                    if self.vel_a != 0 or self.vel_b != 0:
-                        if self.vel_a != self.last_vel_a or self.vel_b != self.last_vel_b or not self.is_moving:
-                            try:
-                                self.bot.rotate_steppers_continuously(self.vel_a, ACCEL, self.vel_b, ACCEL)
-                                self.last_vel_a = self.vel_a
-                                self.last_vel_b = self.vel_b
-                                self.is_moving = True
-                            except Exception:
-                                pass
+                    if forward != 0.0 or turn != 0.0:
+                        vel_a, vel_b = calculate_split_stick_drive(forward, turn, MAX_SPEED)
                     else:
-                        if self.is_moving:
-                            try:
-                                self.bot.stop_steppers(ACCEL, ACCEL)
-                                self.last_vel_a = 0
-                                self.last_vel_b = 0
-                                self.is_moving = False
-                            except Exception:
-                                pass
+                        vel_a = 0
+                        vel_b = 0
 
-            # 4. Actualizar UI y Dibujar Canvas del Mando
-            self._update_telemetry_ui(is_pad_connected, active_player)
-            self._draw_gamepad_canvas(left_stick, right_stick, lt, rt, btns, is_pad_connected)
+                    self.pasco_mgr.send_drive(slot_idx, vel_a, vel_b, ACCEL)
+
+                    # Servos
+                    rt_val = p_state.right_trigger.value if p_state.right_trigger else 0.0
+                    lt_val = p_state.left_trigger.value if p_state.left_trigger else 0.0
+                    rt_pressed = p_state.is_button_pressed(Button.ZR) or (rt_val > 0.2)
+                    lt_pressed = p_state.is_button_pressed(Button.ZL) or (lt_val > 0.2)
+                    rb_pressed = p_state.is_button_pressed(Button.R)
+                    lb_pressed = p_state.is_button_pressed(Button.L)
+
+                    step_lift = SERVO_STEP if not INVERT_LIFT else -SERVO_STEP
+                    if rt_pressed:
+                        slot.lift_angle = min(LIFT_MAX, max(LIFT_MIN, slot.lift_angle + step_lift))
+                    elif lt_pressed:
+                        slot.lift_angle = min(LIFT_MAX, max(LIFT_MIN, slot.lift_angle - step_lift))
+
+                    step_pinza = SERVO_STEP if not INVERT_PINZA else -SERVO_STEP
+                    if rb_pressed:
+                        slot.pinza_angle = min(PINZA_MAX, max(PINZA_MIN, slot.pinza_angle + step_pinza))
+                    elif lb_pressed:
+                        slot.pinza_angle = min(PINZA_MAX, max(PINZA_MIN, slot.pinza_angle - step_pinza))
+
+                    self.pasco_mgr.send_servos(slot_idx, slot.lift_angle, slot.pinza_angle, SWAP_SERVO_PORTS)
+
+                # Actualizar telemetría en la UI del robot
+                w = self.robot_ui_widgets.get(slot_idx)
+                if w:
+                    if slot.connected:
+                        w["mot_lbl"].config(text=f"Motores: A={slot.last_vel_a:+d} | B={slot.last_vel_b:+d} deg/s", fg="#50fa7b" if slot.is_moving else "#abb2bf")
+                        w["servo_lbl"].config(text=f"Elev: {int(slot.lift_angle):+d}° | Pinza: {int(slot.pinza_angle):+d}°", fg="#8be9fd")
+                    else:
+                        w["mot_lbl"].config(text="Motores: A=0 | B=0 deg/s", fg="#6272a4")
+                        w["servo_lbl"].config(text="Elev: -- | Pinza: --", fg="#6272a4")
+
+            # 4. Renderizar el mando seleccionado actualmente
+            active_p_state = player_states.get(self.active_view_player, GamepadState())
+            cw = self.gamepad_canvas.winfo_width()
+            ch = self.gamepad_canvas.winfo_height()
+            if cw > 50 and ch > 50:
+                self.renderer.render(active_p_state, cw, ch)
+
+            # 5. Actualizar indicadores de conexión de mandos en la barra
+            conn_count = 0
+            for p in range(MAX_ROBOTS):
+                is_p_conn = player_states[p].is_connected
+                if is_p_conn:
+                    conn_count += 1
+                dot = "●" if is_p_conn else ""
+                bg_col = "#50fa7b" if p == self.active_view_player else ("#282c34" if is_p_conn else "#1e222b")
+                fg_col = "#000000" if p == self.active_view_player else ("#50fa7b" if is_p_conn else "#6272a4")
+                self.player_tab_btns[p].config(text=f"P{p+1} {dot}".strip(), bg=bg_col, fg=fg_col)
+                if p == self.active_view_player:
+                    self.pad_status_lbl.config(
+                        text=f"Mando Jugador {p+1}: {'CONECTADO' if is_p_conn else 'DESCONECTADO'}",
+                        fg="#50fa7b" if is_p_conn else "#ff5555"
+                    )
+                dot = "●" if is_p_conn else "○"
+                col = "#50fa7b" if is_p_conn else "#4c566a"
+                if p == self.active_view_player:
+                    self.pad_status_lbl.config(
+                        text=f"Mando Jugador {p+1}: {'CONECTADO' if is_p_conn else 'DESCONECTADO'}",
+                        fg="#50fa7b" if is_p_conn else "#ffb86c"
+                    )
 
         except Exception as e:
             print(f"Error en _poll_step: {e}")
         finally:
-            # Repetir a ~60 FPS (16 ms) de forma garantizada
             self.root.after(16, self._poll_step)
-
-    def _update_telemetry_ui(self, is_pad_connected, player_idx=0):
-        if is_pad_connected:
-            self.status_badge.config(text=f"● MANDO CONECTADO (JUGADOR {player_idx + 1})", fg="#50fa7b")
-        else:
-            self.status_badge.config(text="● ESPERANDO MANDO", fg="#ffb86c")
-
-        self.lbl_vel_a.config(text=f"Motor Izquierdo (A): {self.vel_a:+4d} deg/s")
-        self.lbl_vel_b.config(text=f"Motor Derecho (B):   {self.vel_b:+4d} deg/s")
-        self.lbl_lift.config(text=f"Elevación:   {self.lift_angle:+4d}° [RT/LT]")
-        self.lbl_pinza.config(text=f"Pinza:       {self.pinza_angle:+4d}° [RB/LB]")
-
-    def _draw_gamepad_canvas(self, ls, rs, lt, rt, btns, connected):
-        self.canvas.delete("all")
-        w = self.canvas.winfo_width()
-        h = self.canvas.winfo_height()
-        if w < 10 or h < 10:
-            return
-
-        cx = w / 2
-        cy = h / 2
-
-        # 1. Dibujar Sticks Analógicos (Izquierdo y Derecho)
-        stick_radius = 55
-        # Stick L (Avance / Retroceso)
-        sl_cx = cx - 140
-        sl_cy = cy + 40
-        self._draw_analog_stick(sl_cx, sl_cy, stick_radius, ls.x, ls.y, "Stick L (Avance)", btns[Button.LSTICK])
-
-        # Stick R (Giro)
-        sr_cx = cx + 140
-        sr_cy = cy + 40
-        self._draw_analog_stick(sr_cx, sr_cy, stick_radius, rs.x, rs.y, "Stick R (Giro)", btns[Button.RSTICK])
-
-        # 2. Dibujar Gatillos Analógicos (LT / RT)
-        # LT Bar
-        self._draw_trigger_gauge(sl_cx - 80, cy - 90, 26, 120, lt.value, "LT / L2\n(Bajar)", btns[Button.ZL])
-        # RT Bar
-        self._draw_trigger_gauge(sr_cx + 54, cy - 90, 26, 120, rt.value, "RT / R2\n(Subir)", btns[Button.ZR])
-
-        # 3. Dibujar Bumpers (LB / RB)
-        self._draw_button_badge(sl_cx - 50, cy - 110, 50, 24, "LB (Cerrar)", btns[Button.L])
-        self._draw_button_badge(sr_cx, cy - 110, 50, 24, "RB (Abrir)", btns[Button.R])
-
-        # 4. Dibujar Botones de Acción (A, B, X, Y)
-        abxy_cx = sr_cx + 10
-        abxy_cy = cy - 35
-        b_rad = 14
-        self._draw_circle_button(abxy_cx, abxy_cy + 24, b_rad, "A", btns[Button.A], "#50fa7b")
-        self._draw_circle_button(abxy_cx + 24, abxy_cy, b_rad, "B", btns[Button.B], "#ff5555")
-        self._draw_circle_button(abxy_cx - 24, abxy_cy, b_rad, "X", btns[Button.X], "#8be9fd")
-        self._draw_circle_button(abxy_cx, abxy_cy - 24, b_rad, "Y", btns[Button.Y], "#ffb86c")
-
-        # 5. Dibujar D-Pad
-        dpad_cx = sl_cx - 10
-        dpad_cy = cy - 35
-        self._draw_dpad_button(dpad_cx, dpad_cy - 24, 18, 14, "▲", btns[Button.DUP])
-        self._draw_dpad_button(dpad_cx, dpad_cy + 24, 18, 14, "▼", btns[Button.DDOWN])
-        self._draw_dpad_button(dpad_cx - 24, dpad_cy, 14, 18, "◀", btns[Button.DLEFT])
-        self._draw_dpad_button(dpad_cx + 24, dpad_cy, 14, 18, "▶", btns[Button.DRIGHT])
-
-        # 6. Botones Centrales (+ / - / Home)
-        self._draw_button_badge(cx - 35, cy - 60, 24, 18, "-", btns[Button.MINUS])
-        self._draw_button_badge(cx + 11, cy - 60, 24, 18, "+", btns[Button.PLUS])
-
-        if not connected:
-            self.canvas.create_rectangle(0, 0, w, h, fill="#191a21", stipple="gray50")
-            self.canvas.create_text(
-                cx, cy,
-                text="⚠️ Conecta tu mando (USB / Bluetooth)\npara comenzar a visualizar",
-                fill="#ffb86c",
-                font=("Segoe UI", 12, "bold"),
-                justify=tk.CENTER
-            )
-
-    def _draw_analog_stick(self, x, y, radius, sx, sy, label, pressed):
-        # Base circle
-        self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, outline="#44475a", width=2, fill="#21222c")
-        self.canvas.create_line(x - radius, y, x + radius, y, fill="#282a36", width=1)
-        self.canvas.create_line(x, y - radius, x, y + radius, fill="#282a36", width=1)
-
-        # Animated dot
-        dot_x = x + (sx * (radius - 12))
-        dot_y = y - (sy * (radius - 12))  # Note: sy > 0 is up
-        dot_color = "#ff79c6" if pressed else "#50fa7b"
-        self.canvas.create_oval(dot_x - 10, dot_y - 10, dot_x + 10, dot_y + 10, fill=dot_color, outline="#ffffff", width=1)
-
-        # Label
-        self.canvas.create_text(x, y + radius + 15, text=f"{label}\n({sx:+.2f}, {sy:+.2f})", fill="#f8f8f2", font=("Consolas", 8), justify=tk.CENTER)
-
-    def _draw_trigger_gauge(self, x, y, width, height, value, label, pressed):
-        # Background bar
-        self.canvas.create_rectangle(x, y, x + width, y + height, fill="#21222c", outline="#44475a", width=1)
-        # Fill bar from bottom to top
-        fill_h = int(height * max(0.0, min(1.0, value)))
-        fill_color = "#50fa7b" if not pressed else "#ff79c6"
-        if fill_h > 0:
-            self.canvas.create_rectangle(x + 2, y + height - fill_h, x + width - 2, y + height - 2, fill=fill_color, width=0)
-
-        # Text
-        self.canvas.create_text(x + width / 2, y + height + 15, text=f"{label}\n{int(value*100)}%", fill="#f8f8f2", font=("Segoe UI", 7), justify=tk.CENTER)
-
-    def _draw_button_badge(self, x, y, width, height, label, pressed):
-        bg = "#50fa7b" if pressed else "#44475a"
-        fg = "#282a36" if pressed else "#f8f8f2"
-        self.canvas.create_rectangle(x, y, x + width, y + height, fill=bg, outline="#6272a4", width=1)
-        self.canvas.create_text(x + width / 2, y + height / 2, text=label, fill=fg, font=("Segoe UI", 7, "bold"))
-
-    def _draw_circle_button(self, x, y, radius, label, pressed, active_color):
-        bg = active_color if pressed else "#44475a"
-        fg = "#282a36" if pressed else "#f8f8f2"
-        self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, fill=bg, outline="#6272a4", width=1)
-        self.canvas.create_text(x, y, text=label, fill=fg, font=("Segoe UI", 8, "bold"))
-
-    def _draw_dpad_button(self, x, y, w, h, label, pressed):
-        bg = "#8be9fd" if pressed else "#44475a"
-        fg = "#282a36" if pressed else "#f8f8f2"
-        self.canvas.create_rectangle(x - w / 2, y - h / 2, x + w / 2, y + h / 2, fill=bg, outline="#6272a4", width=1)
-        self.canvas.create_text(x, y, text=label, fill=fg, font=("Segoe UI", 8, "bold"))
-
-    def on_close(self):
-        self._disconnect_robot()
-        self.pad.shutdown()
-        self.root.destroy()
-
 
 def main():
     root = tk.Tk()
     app = VisualGamepadApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_close)
+    root.protocol("WM_DELETE_WINDOW", lambda: (app.pasco_mgr.disconnect_all(), app.pad.shutdown(), root.destroy()))
     root.mainloop()
-
 
 if __name__ == "__main__":
     main()
