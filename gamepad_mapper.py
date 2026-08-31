@@ -409,32 +409,33 @@ class GamepadManager:
         if self._sdl and player in self._sdl_gamepads:
             pad = self._sdl_gamepads[player]
             mapping = {
-                Button.A: [0, 1],
-                Button.B: [1, 0],
-                Button.X: [2, 3],
-                Button.Y: [3, 2],
-                Button.LSTICK: [7],
-                Button.RSTICK: [8],
-                Button.L: [9],
-                Button.R: [10],
-                Button.PLUS: [6],
-                Button.MINUS: [4],
-                Button.DUP: [11],
-                Button.DDOWN: [12],
-                Button.DLEFT: [13],
-                Button.DRIGHT: [14],
-                Button.HOME: [5],
-                Button.SCREENSHOT: [15],
+                Button.A: 0,
+                Button.B: 1,
+                Button.X: 2,
+                Button.Y: 3,
+                Button.LSTICK: 7,
+                Button.RSTICK: 8,
+                Button.L: 9,
+                Button.R: 10,
+                Button.PLUS: 6,
+                Button.MINUS: 4,
+                Button.DUP: 11,
+                Button.DDOWN: 12,
+                Button.DLEFT: 13,
+                Button.DRIGHT: 14,
+                Button.HOME: 5,
+                Button.SCREENSHOT: 15,
             }
             if b_idx in mapping:
-                for sdl_btn in mapping[b_idx]:
-                    if self._sdl.SDL_GetGamepadButton(pad, sdl_btn):
-                        return True
+                if self._sdl.SDL_GetGamepadButton(pad, mapping[b_idx]):
+                    return True
 
             if b_idx == Button.ZL:
                 return self._sdl.SDL_GetGamepadAxis(pad, 4) > 9800
             elif b_idx == Button.ZR:
                 return self._sdl.SDL_GetGamepadAxis(pad, 5) > 9800
+
+            return False
 
         return bool(self._dll.gamepad_is_button_pressed(player, b_idx))
 

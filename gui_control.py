@@ -504,8 +504,8 @@ class VisualGamepadApp:
         b_rad = 14
         self._draw_circle_button(abxy_cx, abxy_cy + 24, b_rad, "A", btns[Button.A], "#50fa7b")
         self._draw_circle_button(abxy_cx + 24, abxy_cy, b_rad, "B", btns[Button.B], "#ff5555")
-        self._draw_circle_button(abxy_cx - 24, abxy_cy, b_rad, "Y", btns[Button.Y], "#ffb86c")
-        self._draw_circle_button(abxy_cx, abxy_cy - 24, b_rad, "X", btns[Button.X], "#8be9fd")
+        self._draw_circle_button(abxy_cx - 24, abxy_cy, b_rad, "X", btns[Button.X], "#8be9fd")
+        self._draw_circle_button(abxy_cx, abxy_cy - 24, b_rad, "Y", btns[Button.Y], "#ffb86c")
 
         # 5. Dibujar D-Pad
         dpad_cx = sl_cx - 10
