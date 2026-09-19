@@ -29,11 +29,13 @@ class RobotSlot:
         self.lock = threading.Lock()
 
 class MultiPascoManager:
+    _ble_connect_lock = threading.Lock()
+
     def __init__(self, num_robots: int = MAX_ROBOTS):
         self.num_robots = min(num_robots, MAX_ROBOTS)
         self.slots: Dict[int, RobotSlot] = {}
         
-        default_ids = ["438-831", "438-576", "438-123", "438-456", "438-789"]
+        default_ids = ["438-621", "438-576", "439-026", "438-456", "438-789"]
         for i in range(self.num_robots):
             did = default_ids[i] if i < len(default_ids) else f"438-00{i+1}"
             self.slots[i] = RobotSlot(i, did)
@@ -65,24 +67,39 @@ class MultiPascoManager:
 
         def _worker():
             slot.connecting = True
-            slot.status_msg = "Conectando..."
+            slot.status_msg = "En cola..."
             target_id = slot.pasco_id.strip()
             if len(target_id) == 6 and '-' not in target_id:
                 target_id = f"{target_id[:3]}-{target_id[3:]}"
                 slot.pasco_id = target_id
 
-            try:
-                bot = PascoBot()
-                bot.connect_by_id(target_id)
-                with slot.lock:
-                    slot.bot = bot
-                    slot.connected = True
-                    slot.connecting = False
-                    slot.status_msg = f"Conectado ({target_id})"
-                if on_complete:
-                    on_complete(slot_id, True, slot.status_msg)
-            except Exception as e:
-                err_str = str(e)
+            # Serializar la inicialización de escaneo y emparejamiento BLE
+            with MultiPascoManager._ble_connect_lock:
+                slot.status_msg = f"Conectando ({target_id})..."
+                last_err = None
+                for attempt in range(3):
+                    bot = None
+                    try:
+                        bot = PascoBot()
+                        bot.connect_by_id(target_id)
+                        with slot.lock:
+                            slot.bot = bot
+                            slot.connected = True
+                            slot.connecting = False
+                            slot.status_msg = f"Conectado ({target_id})"
+                        if on_complete:
+                            on_complete(slot_id, True, slot.status_msg)
+                        return
+                    except Exception as e:
+                        last_err = str(e)
+                        if bot:
+                            try:
+                                bot.disconnect()
+                            except Exception:
+                                pass
+                        time.sleep(1.0)
+
+                err_str = last_err if last_err else "Error de conexión"
                 if len(err_str) > 25:
                     err_str = err_str[:25]
                 with slot.lock:

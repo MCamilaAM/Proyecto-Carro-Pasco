@@ -250,6 +250,15 @@ def _load_sdl3_dll():
                 sdl.SDL_RumbleGamepad.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint32]
                 sdl.SDL_RumbleGamepad.restype = ctypes.c_bool
 
+                class SDL_GUID(ctypes.Structure):
+                    _fields_ = [("data", ctypes.c_uint8 * 16)]
+
+                sdl.SDL_GetGamepadGUIDForID.argtypes = [ctypes.c_uint32]
+                sdl.SDL_GetGamepadGUIDForID.restype = SDL_GUID
+
+                sdl.SDL_GUIDToString.argtypes = [SDL_GUID, ctypes.c_char_p, ctypes.c_int]
+                sdl.SDL_GUIDToString.restype = None
+
                 sdl.SDL_PollEvent.argtypes = [ctypes.c_void_p]
                 sdl.SDL_PollEvent.restype = ctypes.c_bool
 
@@ -268,7 +277,11 @@ class GamepadManager:
     _instance = None
     _dll = None
     _sdl = None
-    _sdl_gamepads = {}
+    _sdl_gamepads = {}         # port -> handle
+    _sdl_gamepad_guids = {}    # port -> guid string
+    _sdl_gamepad_names = {}    # port -> device name string
+    _player_ini_config = {}    # player_idx -> dict(connected, guid, port)
+    _player_assigned_port = {} # player_idx -> port
     _event_buf = ctypes.c_buffer(128)
 
     def __new__(cls):
@@ -364,20 +377,27 @@ class GamepadManager:
             count = ctypes.c_int(0)
             ptr = self._sdl.SDL_GetGamepads(ctypes.byref(count))
             self._sdl_gamepads.clear()
+            self._sdl_gamepad_guids.clear()
+            self._sdl_gamepad_names.clear()
+            buf = ctypes.create_string_buffer(33)
             if count.value > 0:
                 for i in range(count.value):
                     gid = ptr[i]
                     handle = self._sdl.SDL_OpenGamepad(gid)
                     if handle:
                         self._sdl_gamepads[i] = handle
+                        guid_struct = self._sdl.SDL_GetGamepadGUIDForID(gid)
+                        self._sdl.SDL_GUIDToString(guid_struct, buf, 33)
+                        self._sdl_gamepad_guids[i] = buf.value.decode("ascii")
+                        name_bytes = self._sdl.SDL_GetGamepadName(handle)
+                        self._sdl_gamepad_names[i] = name_bytes.decode("utf-8", errors="ignore") if name_bytes else f"Gamepad {i}"
+            self._resolve_player_ports()
         except Exception:
             pass
 
-    _player_ports = {}
-
     def _reload_ini_ports(self):
         ini_path = os.path.join(os.environ.get("LOCALAPPDATA", ""), "GamepadMapper", "gamepad_mapper.ini")
-        self._player_ports.clear()
+        self._player_ini_config.clear()
         if os.path.exists(ini_path):
             try:
                 with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -387,45 +407,70 @@ class GamepadManager:
                             parts = line.split("=")
                             p_idx = int(parts[0].replace("player_", "").replace("_connected", ""))
                             conn = parts[1].strip().lower() == "true"
-                            if p_idx not in self._player_ports:
-                                self._player_ports[p_idx] = {"connected": conn, "port": p_idx}
+                            if p_idx not in self._player_ini_config:
+                                self._player_ini_config[p_idx] = {"connected": conn, "guid": "", "port": p_idx}
                             else:
-                                self._player_ports[p_idx]["connected"] = conn
+                                self._player_ini_config[p_idx]["connected"] = conn
                         elif line.startswith("player_") and ("_lstick=" in line or "_button_a=" in line):
                             parts = line.split("=", 1)
                             p_idx = int(parts[0].replace("player_", "").split("_")[0])
                             val = parts[1].strip().strip('"')
+                            if p_idx not in self._player_ini_config:
+                                self._player_ini_config[p_idx] = {"connected": True, "guid": "", "port": p_idx}
+                            if "guid:" in val:
+                                g_str = val.split("guid:")[1].split(",")[0]
+                                self._player_ini_config[p_idx]["guid"] = g_str
                             if "port:" in val:
                                 port_str = val.split("port:")[1].split(",")[0]
                                 try:
-                                    port_num = int(port_str)
-                                    if p_idx not in self._player_ports:
-                                        self._player_ports[p_idx] = {"connected": True, "port": port_num}
-                                    else:
-                                        self._player_ports[p_idx]["port"] = port_num
+                                    self._player_ini_config[p_idx]["port"] = int(port_str)
                                 except Exception:
                                     pass
             except Exception:
                 pass
+        self._resolve_player_ports()
+
+    def _resolve_player_ports(self):
+        self._player_assigned_port.clear()
+        claimed_ports = set()
+
+        # Pass 1: Match by GUID substring (Vendor + Product ID in bytes 8:20)
+        for p in range(5):
+            cfg = self._player_ini_config.get(p, {})
+            if not cfg.get("connected", (p == 0)):
+                continue
+            p_guid = cfg.get("guid", "")
+            if p_guid and len(p_guid) >= 20:
+                key = p_guid[8:20]
+                for port, g_guid in self._sdl_gamepad_guids.items():
+                    if port not in claimed_ports and (p_guid == g_guid or key in g_guid):
+                        self._player_assigned_port[p] = port
+                        claimed_ports.add(port)
+                        break
+
+        # Pass 2: Sequential 1-to-1 fallback for enabled players
+        for p in range(5):
+            if p in self._player_assigned_port:
+                continue
+            cfg = self._player_ini_config.get(p, {})
+            if not cfg.get("connected", (p == 0)):
+                continue
+            if p in self._sdl_gamepads and p not in claimed_ports:
+                self._player_assigned_port[p] = p
+                claimed_ports.add(p)
+            else:
+                for port in sorted(self._sdl_gamepads.keys()):
+                    if port not in claimed_ports:
+                        self._player_assigned_port[p] = port
+                        claimed_ports.add(port)
+                        break
 
     def _get_player_pad(self, player: int):
         if not self._sdl:
             return None
-        # Look up mapped port for this player
-        info = self._player_ports.get(player)
-        if info:
-            if not info.get("connected", True):
-                return None
-            port = info.get("port", player)
-            if port in self._sdl_gamepads:
-                return self._sdl_gamepads[port]
-        # Fallback 1: direct player index
-        if player in self._sdl_gamepads:
-            return self._sdl_gamepads[player]
-        # Fallback 2: if only 1 physical gamepad is connected and player is connected in INI
-        if 0 in self._sdl_gamepads and len(self._sdl_gamepads) == 1:
-            if info is None or info.get("connected", True):
-                return self._sdl_gamepads[0]
+        port = self._player_assigned_port.get(player)
+        if port is not None and port in self._sdl_gamepads:
+            return self._sdl_gamepads[port]
         return None
 
     def initialize(self) -> bool:
