@@ -437,8 +437,6 @@ class GamepadManager:
         # Pass 1: Match by GUID substring (Vendor + Product ID in bytes 8:20)
         for p in range(5):
             cfg = self._player_ini_config.get(p, {})
-            if not cfg.get("connected", (p == 0)):
-                continue
             p_guid = cfg.get("guid", "")
             if p_guid and len(p_guid) >= 20:
                 key = p_guid[8:20]
@@ -448,12 +446,9 @@ class GamepadManager:
                         claimed_ports.add(port)
                         break
 
-        # Pass 2: Sequential 1-to-1 fallback for enabled players
+        # Pass 2: Sequential 1-to-1 fallback for any connected physical gamepad
         for p in range(5):
             if p in self._player_assigned_port:
-                continue
-            cfg = self._player_ini_config.get(p, {})
-            if not cfg.get("connected", (p == 0)):
                 continue
             if p in self._sdl_gamepads and p not in claimed_ports:
                 self._player_assigned_port[p] = p
@@ -511,8 +506,10 @@ class GamepadManager:
         """Verifica si el jugador (0..7) tiene un mando conectado."""
         if self._sdl:
             pad = self._get_player_pad(player)
-            if pad:
+            if pad is not None:
                 return True
+            if player < 5 and self._sdl_gamepads:
+                return False
         return bool(self._dll.gamepad_is_connected(player))
 
     def get_type(self, player: int = 0) -> ControllerType:
