@@ -365,6 +365,7 @@ class GamepadManager:
                 self._sdl.SDL_SetHint(b"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", b"1")
                 self._sdl.SDL_SetHint(b"SDL_JOYSTICK_RAWINPUT", b"1")
                 self._sdl.SDL_SetHint(b"SDL_JOYSTICK_THREAD", b"1")
+                self._sdl.SDL_SetHint(b"SDL_JOYSTICK_HIDAPI", b"0")
                 self._sdl.SDL_Init(0x00000200 | 0x00000008) # SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD
                 self._refresh_sdl_gamepads()
             except Exception:

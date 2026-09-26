@@ -2,6 +2,11 @@
 import time
 import threading
 from typing import Dict, Optional, Callable
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except Exception:
+    pass
 from pasco.pasco_bot import PascoBot
 
 MAX_ROBOTS = 5
@@ -77,11 +82,17 @@ class MultiPascoManager:
             with MultiPascoManager._ble_connect_lock:
                 slot.status_msg = f"Conectando ({target_id})..."
                 last_err = None
-                for attempt in range(3):
+                for attempt in range(4):
                     bot = None
                     try:
                         bot = PascoBot()
-                        bot.connect_by_id(target_id)
+                        try:
+                            bot.connect_by_id(target_id)
+                        except Exception:
+                            # Intento secundario con ID plano sin guión por si difiere la emisión del dispositivo
+                            raw_id = target_id.replace("-", "")
+                            bot.connect_by_id(raw_id)
+
                         with slot.lock:
                             slot.bot = bot
                             slot.connected = True
@@ -97,7 +108,7 @@ class MultiPascoManager:
                                 bot.disconnect()
                             except Exception:
                                 pass
-                        time.sleep(1.0)
+                        time.sleep(1.2)
 
                 err_str = last_err if last_err else "Error de conexión"
                 if len(err_str) > 25:
