@@ -1,4 +1,5 @@
 # Multi-Robot Manager for PASCO //control.Node devices
+import sys
 import time
 import threading
 from typing import Dict, Optional, Callable
@@ -71,6 +72,13 @@ class MultiPascoManager:
             return
 
         def _worker():
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    ctypes.windll.ole32.CoInitializeEx(None, 0)
+                except Exception:
+                    pass
+
             slot.connecting = True
             slot.status_msg = "En cola..."
             target_id = slot.pasco_id.strip()
@@ -129,6 +137,12 @@ class MultiPascoManager:
             return
 
         def _worker():
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    ctypes.windll.ole32.CoInitializeEx(None, 0)
+                except Exception:
+                    pass
             with slot.lock:
                 if slot.bot and slot.connected:
                     try:
