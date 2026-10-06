@@ -6,6 +6,7 @@ Provides clean Pythonic access to GamepadMapperLib (C++20 Gamepad Subsystem).
 
 import os
 import sys
+import time
 import ctypes
 import subprocess
 from enum import IntEnum
@@ -283,6 +284,7 @@ class GamepadManager:
     _player_ini_config = {}    # player_idx -> dict(connected, guid, port)
     _player_assigned_port = {} # player_idx -> port
     _event_buf = ctypes.c_buffer(128)
+    _last_sdl_refresh_time = 0.0
 
     def __new__(cls):
         if cls._instance is None:
@@ -374,6 +376,7 @@ class GamepadManager:
     def _refresh_sdl_gamepads(self):
         if not self._sdl:
             return
+        self._last_sdl_refresh_time = time.time()
         try:
             count = ctypes.c_int(0)
             ptr = self._sdl.SDL_GetGamepads(ctypes.byref(count))
@@ -493,7 +496,7 @@ class GamepadManager:
             self._sdl.SDL_PumpEvents()
             while self._sdl.SDL_PollEvent(self._event_buf):
                 pass
-            if not self._sdl_gamepads:
+            if not self._sdl_gamepads and (time.time() - self._last_sdl_refresh_time > 3.0):
                 self._refresh_sdl_gamepads()
         self._dll.gamepad_update()
 
