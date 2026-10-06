@@ -379,10 +379,6 @@ class VisualGamepadApp:
             # 1. Actualizar estado del GamepadManager
             self.pad.update()
 
-            self._frame_count = getattr(self, "_frame_count", 0) + 1
-            if self._frame_count % 30 == 0:
-                self.pad.reload()
-
             # 2. Procesar cada uno de los 5 Jugadores
             player_states = {}
             for p in range(MAX_ROBOTS):
